@@ -4,7 +4,7 @@ import re
 
 from ollama import chat
 
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen3:1.7b")
 
 
 def clean_json_output(raw_output):
