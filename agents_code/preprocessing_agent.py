@@ -1,11 +1,8 @@
 import json
 import os
 import re
-import sys
 
 from ollama import chat
-
-sys.stdout.reconfigure(encoding="utf-8")
 
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen3:1.7b")
 
@@ -23,11 +20,14 @@ def clean_json_output(raw_output):
         raise ValueError("Model returned empty JSON output")
 
     try:
-        json.loads(cleaned)
+        result = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Model output is not valid JSON: {exc}") from exc
 
-    return cleaned
+    if not isinstance(result, dict):
+        raise ValueError("Model output must be a JSON object")
+
+    return result
 
 
 system_prompt = """
@@ -347,84 +347,26 @@ Return ONLY the JSON object.
 
 """
 
-user_prompt = """
-Analyze this dataset description and determine the appropriate
-preprocessing operations.
+def preprocessing_agent(dataset_description):
+    if isinstance(dataset_description, str):
+        description_json = dataset_description
+    else:
+        description_json = json.dumps(dataset_description, ensure_ascii=False)
 
-DATASET DESCRIPTION:
-
-{
-  "rows": 1000,
-  "columns": 6,
-  "duplicate_rows": 12,
-  "target_column": "Purchased",
-
-  "numerical_columns": {
-    "Age": {
-      "dtype": "float64",
-      "missing": 35,
-      "unique_count": 62,
-      "min": 18,
-      "max": 72,
-      "mean": 39.8,
-      "median": 38.0
-    },
-    "Income": {
-      "dtype": "float64",
-      "missing": 8,
-      "unique_count": 985,
-      "min": 18000,
-      "max": 450000,
-      "mean": 78500,
-      "median": 52000
-    },
-    "Purchase_Count": {
-      "dtype": "int64",
-      "missing": 0,
-      "unique_count": 18,
-      "min": 0,
-      "max": 17,
-      "mean": 4.2,
-      "median": 3
-    }
-  },
-
-  "categorical_columns": {
-    "Gender": {
-      "dtype": "object",
-      "missing": 20,
-      "unique_count": 3,
-      "categories": ["Male", "Female", "Other"]
-    },
-    "City": {
-      "dtype": "object",
-      "missing": 5,
-      "unique_count": 4,
-      "categories": ["Chennai", "Coimbatore", "Bangalore", "Mumbai"]
-    }
-  },
-
-  "target": {
-    "column": "Purchased",
-    "dtype": "object",
-    "unique_count": 2,
-    "categories": ["Yes", "No"],
-    "missing": 0
-  }
-}
-"""
-
-try:
+    prompt = system_prompt.replace(
+        "<DATASET_DESCRIPTION_JSON>",
+        description_json,
+    )
     response = chat(
         model=MODEL_NAME,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": "Analyze the provided dataset description and return the preprocessing decisions as JSON.",
+            },
         ],
         format="json",
-        options={"temperature": 0},
+        options={"temperature": 0.1}
     )
-    print(clean_json_output(response.message.content))
-except Exception as exc:
-    print(json.dumps({"error": str(exc)}))
-    sys.exit(1)
+    return clean_json_output(response.message.content)

@@ -3,9 +3,8 @@ import os
 import pandas as pd
 
 
-def read_csv_files():
+def read_csv_files(path):
     """Prompt for a path and read one or more CSV files."""
-    path = input("Enter the path to the CSV file or directory: ")
 
     if os.path.isfile(path):
         if os.path.splitext(path)[1].lower() != ".csv":
