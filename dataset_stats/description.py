@@ -126,12 +126,3 @@ def generate_report(data, file_names, target_column):
         reports.append(report)
 
     return json.dumps({"Reports": reports}, indent=4, default=str)
-
-
-if __name__ == "__main__":
-    file_paths = [
-        r"D:\Kavin\College work\Sem 5\ML\package\datasets\dataset_parsed.csv"
-    ]
-    dataframes = [pd.read_csv(path) for path in file_paths]
-    target_column = input("Enter the target column name: ")
-    print(generate_report(dataframes, file_paths, target_column))
