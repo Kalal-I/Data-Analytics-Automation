@@ -3,6 +3,11 @@ import os
 
 import pandas as pd
 
+from dataset_stats.column_analysis import (
+    analyze_column,
+    distinct_values,
+    non_missing_values,
+)
 
 def to_json_value(value):
     if hasattr(value, "item"):
@@ -16,38 +21,37 @@ def get_missing_percentage(values):
     return round(float(values.isna().sum()) / len(values) * 100, 2)
 
 
-def get_column_report(values, classification_values):
-    non_null_values = values.dropna()
-    numeric_values = pd.to_numeric(values, errors="coerce")
-    valid_numeric_count = int(numeric_values.notna().sum())
+def get_column_report(values):
+    """Return profile details using the shared dataset column classification."""
+    analysis = analyze_column(values)
+    non_null_values = non_missing_values(values)
+    numeric_values = analysis.numeric_values
+    valid_values = numeric_values.dropna()
 
-    if pd.api.types.is_numeric_dtype(values.dtype) or valid_numeric_count > 0:
-        valid_values = numeric_values.dropna()
-        bad_characters = 0
-        if not pd.api.types.is_numeric_dtype(values.dtype):
-            bad_characters = len(non_null_values) - valid_numeric_count
-
+    if analysis.numeric_candidate:
         return "Numerical", {
             "Max value": to_json_value(valid_values.max()) if not valid_values.empty else None,
             "Min value": to_json_value(valid_values.min()) if not valid_values.empty else None,
             "Mean": to_json_value(valid_values.mean()) if not valid_values.empty else None,
             "Median": to_json_value(valid_values.median()) if not valid_values.empty else None,
             "Missing percentage": get_missing_percentage(values),
-            "Bad characters": bad_characters
+            "Bad characters": analysis.invalid_count
         }
 
-    is_non_categorical = (
-        classification_values.nunique() == len(classification_values)
-    )
-    if is_non_categorical:
+    distinct_non_null_values = distinct_values(non_null_values)
+    if analysis.detected_type in {
+        "all_missing",
+        "constant",
+        "non_categorical_string",
+    }:
         return "Non-categorical string", {
             "Missing percentage": get_missing_percentage(values),
-            "Duplicates": int(non_null_values.duplicated().sum())
+            "Duplicates": len(non_null_values) - len(distinct_non_null_values)
         }
 
-    categories = non_null_values.unique()
+    categories = distinct_non_null_values
     return "Categorical", {
-        "Number of unique values": int(non_null_values.nunique()),
+        "Number of unique values": len(categories),
         "Categories": [to_json_value(value) for value in categories[:10]],
         "Missing percentage": get_missing_percentage(values)
     }
@@ -84,7 +88,6 @@ def generate_report(data, file_names, target_column):
                 )
             )
 
-        unique_rows = dataframe.drop_duplicates()
         duplicate_count = int(dataframe.duplicated().sum())
         duplicate_percentage = (
             round(duplicate_count / len(dataframe) * 100, 2)
@@ -105,10 +108,7 @@ def generate_report(data, file_names, target_column):
 
         for column in dataframe.columns:
             values = dataframe[column]
-            classification_values = unique_rows[column].dropna()
-            column_type, details = get_column_report(
-                values, classification_values
-            )
+            column_type, details = get_column_report(values)
 
             if column == target_column:
                 report["Target column"] = {
