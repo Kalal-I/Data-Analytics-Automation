@@ -69,3 +69,16 @@ while True:
                     encoded_columns.add(column)
 print("Preprocessing completed. The processed DataFrame is:")
 print(df)
+
+eda_output = {}
+models = {"LinearRegression": "linear_regression_agent",}
+for i in eda_output["ranked_models"]:
+    model_name = i["model_name"]
+    if model_name in models:
+        module_name = models[model_name]
+        module = __import__(f"agents_code.{module_name}", fromlist=[""])
+        model_function = getattr(module, "create_folds_and_train")
+        result = model_function(df, target)
+        json_result = module.split_result_to_json(result, target)
+        print(f"JSON result for {model_name}:")
+        print(json_result)

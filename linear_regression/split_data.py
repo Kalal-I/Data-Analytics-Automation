@@ -21,8 +21,29 @@ from linear_regression.linear_model import (
 def _data_fingerprint(data: pd.DataFrame) -> str:
     """Hash values, index, columns, and dtypes to detect stale saved folds."""
     digest = hashlib.sha256()
-    digest.update(json.dumps([str(column) for column in data.columns]).encode("utf-8"))
+    column_metadata = [
+        {
+            "type": "{}.{}".format(type(column).__module__, type(column).__qualname__),
+            "repr": repr(column),
+        }
+        for column in data.columns
+    ]
+    digest.update(json.dumps(column_metadata, ensure_ascii=False).encode("utf-8"))
     digest.update(json.dumps([str(dtype) for dtype in data.dtypes]).encode("utf-8"))
+    index_metadata = {
+        "type": "{}.{}".format(
+            type(data.index).__module__, type(data.index).__qualname__
+        ),
+        "dtype": str(data.index.dtype),
+        "names": [
+            {
+                "type": "{}.{}".format(type(name).__module__, type(name).__qualname__),
+                "repr": repr(name),
+            }
+            for name in data.index.names
+        ],
+    }
+    digest.update(json.dumps(index_metadata, ensure_ascii=False).encode("utf-8"))
     try:
         row_hashes = pd.util.hash_pandas_object(data, index=True).to_numpy()
     except (TypeError, ValueError) as error:
@@ -71,10 +92,15 @@ def _cross_validation_metrics(
 
     fold_scores = {"r2": [], "mae": [], "rmse": []}
     for train_indices, validation_indices in cv_splits:
+        actual = target.iloc[validation_indices]
+        if actual.nunique() < 2:
+            raise ValueError(
+                "Five-fold cross-validation produced an undefined R^2 score; "
+                "a validation fold has a constant target."
+            )
         model = LinearRegression()
         model.fit(predictors.iloc[train_indices], target.iloc[train_indices])
         predictions = model.predict(predictors.iloc[validation_indices])
-        actual = target.iloc[validation_indices]
         fold_scores["r2"].append(float(r2_score(actual, predictions)))
         fold_scores["mae"].append(float(mean_absolute_error(actual, predictions)))
         fold_scores["rmse"].append(
@@ -104,12 +130,27 @@ def _validate_saved_folds(
     """Validate persisted positional splits before using them."""
     if not isinstance(folds, dict):
         raise TypeError("folds must be a dictionary returned by the fold utility.")
-    if folds.get("row_count") != len(data):
+    schema_version = folds.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+    ):
+        raise ValueError("Saved folds have an unsupported schema version.")
+    row_count = folds.get("row_count")
+    if (
+        isinstance(row_count, bool)
+        or not isinstance(row_count, int)
+        or row_count != len(data)
+    ):
         raise ValueError("Saved folds do not match the current number of data rows.")
     if folds.get("data_fingerprint") != _data_fingerprint(data):
         raise ValueError(
             "Saved folds were created for different data or row ordering."
         )
+    random_state = folds.get("random_state")
+    if isinstance(random_state, bool) or not isinstance(random_state, int):
+        raise ValueError("Saved folds must contain an integer random_state.")
 
     train_indices = folds.get("train_indices")
     test_indices = folds.get("test_indices")
