@@ -37,6 +37,103 @@ def test_normal_regression_reports_expected_correlations():
     assert "mean" not in report["target"]
 
 
+def test_one_hot_encoded_metadata_preserves_valid_binary_statistics():
+    """Binary predictors retain association, MI, and pairwise-correlation evidence."""
+    indicator = [0, 1] * 20
+    companion = [0, 1, 1, 0] * 10
+    data = pd.DataFrame(
+        {
+            "Property_Type_House": indicator,
+            "Renovated_Yes": companion,
+            "target": [2 * value + companion_value for value, companion_value
+                       in zip(indicator, companion)],
+        }
+    )
+
+    report = _report(
+        data,
+        one_hot_encoded_features=[
+            "Property_Type_House",
+            "Renovated_Yes",
+        ],
+    )
+
+    assert report["encoding_metadata"]["one_hot_encoded_features"] == [
+        "Property_Type_House",
+        "Renovated_Yes",
+    ]
+    assert "one-hot-encoded binary variables" in report["encoding_metadata"][
+        "instruction"
+    ]
+    assert all(
+        feature["encoding"]["type"] == "one_hot_binary"
+        and feature["encoding"]["binary_values_verified"] is True
+        for feature in report["features"]
+    )
+    relationships = {
+        item["feature"]: item
+        for item in report["feature_target_relationships"]
+    }
+    assert relationships["Property_Type_House"]["pearson_correlation"] is not None
+    assert relationships["Property_Type_House"]["spearman_correlation"] is not None
+    mi = {
+        item["feature"]: item["mutual_information"]
+        for item in report["feature_target_mutual_information"]["features"]
+    }
+    assert mi["Property_Type_House"] is not None
+    assert any(
+        {item["feature_1"], item["feature_2"]}
+        == {"Property_Type_House", "Renovated_Yes"}
+        and item["pearson_correlation"] is not None
+        for item in report["feature_feature_relationships"]
+    )
+    quadratic = {
+        item["feature"]: item
+        for item in report["nonlinear_relationship_screening"][
+            "quadratic_feature_screens"
+        ]
+    }
+    assert quadratic["Property_Type_House"]["quadratic_r2"] is None
+    assert quadratic["Property_Type_House"]["limitation"] == (
+        "quadratic_term_redundant_for_binary_feature"
+    )
+
+
+def test_declared_one_hot_feature_with_non_binary_values_is_qualified():
+    """Metadata remains explicit and flags encoded columns not actually 0/1."""
+    report = _report(
+        pd.DataFrame(
+            {"encoded": [0, 1, 2, 0], "target": [1, 2, 3, 4]}
+        ),
+        one_hot_encoded_features=["encoded"],
+    )
+
+    assert report["features"][0]["encoding"]["binary_values_verified"] is False
+    assert report["encoding_metadata"]["binary_values_verified"]["encoded"] is False
+    assert report["feature_target_relationships"][0]["pearson_correlation"] is not None
+    assert any("not verified as binary 0/1" in warning for warning in report["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("encoded_features", "exception", "message"),
+    [
+        (["missing"], ValueError, "not found"),
+        (["target"], ValueError, "target column"),
+        (["x", "x"], ValueError, "duplicates"),
+        (["x", 1], TypeError, "must be a string"),
+        ("x", TypeError, "must be a list"),
+    ],
+)
+def test_one_hot_feature_metadata_is_validated(encoded_features, exception, message):
+    """Invalid encoded-feature metadata fails with a clear exception."""
+    with pytest.raises(exception, match=message):
+        generate_model_statistics(
+            pd.DataFrame({"x": [0, 1, 0], "target": [1, 2, 3]}),
+            "target",
+            one_hot_encoded_features=encoded_features,
+        )
+
+
 def test_added_distribution_mi_cardinality_scale_and_missingness_summaries():
     """New descriptive metrics are additive and keep missingness explicit."""
     data = pd.DataFrame(
