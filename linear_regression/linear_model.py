@@ -115,4 +115,5 @@ def train_linear_regression(
 
     model = LinearRegression()
     model.fit(predictors, target)
+    model.training_row_count_ = len(training_data)
     return model

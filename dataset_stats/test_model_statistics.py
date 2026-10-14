@@ -37,6 +37,113 @@ def test_normal_regression_reports_expected_correlations():
     assert "mean" not in report["target"]
 
 
+def test_added_distribution_mi_cardinality_scale_and_missingness_summaries():
+    """New descriptive metrics are additive and keep missingness explicit."""
+    data = pd.DataFrame(
+        {
+            "signal": [1, 2, 3, 4, 20, None],
+            "category": ["a", "b", "a", "b", "c", "c"],
+            "target": [1, 4, 9, 16, 400, 25],
+        }
+    )
+
+    report = _report(data)
+    signal_distribution = report["distribution_summaries"]["features"][0]
+
+    assert signal_distribution["quantiles"]["q50"] == pytest.approx(3)
+    assert signal_distribution["outliers"]["count"] == 1
+    assert signal_distribution["variance"] is not None
+    assert signal_distribution["skewness"] is not None
+    assert report["feature_target_mutual_information"]["features"][0][
+        "mutual_information"
+    ] is not None
+    cardinality = report["feature_cardinality_and_effective_sample_ratio"]
+    assert cardinality["features"][0]["unique_non_missing_count"] == 5
+    assert cardinality["effective_sample_to_numeric_feature_ratio"] == {
+        "complete_case_sample_count": 5,
+        "numeric_feature_count": 1,
+        "ratio": 5.0,
+        "limitation": None,
+    }
+    assert report["feature_scale_summaries"]["columns"][1]["name"] == "signal"
+    assert report["missingness_patterns"]["columns"][0]["missing_count"] == 1
+    assert report["missingness_patterns"]["row_patterns"][-1] == {
+        "missing_features": ["signal"],
+        "row_count": 1,
+    }
+    assert report["feature_target_relationships"][0]["pearson_correlation"] is not None
+
+
+def test_nonlinear_screen_reports_quadratic_and_pairwise_interaction_gain():
+    """Quadratic and product terms are screened without replacing correlations."""
+    x_values = np.arange(-3, 3, dtype=float)
+    z_values = np.arange(-2, 4, dtype=float)
+    x, z = np.meshgrid(x_values, z_values)
+    data = pd.DataFrame(
+        {
+            "x": x.ravel(),
+            "z": z.ravel(),
+            "target": (x**2 + x * z).ravel(),
+        }
+    )
+
+    report = _report(data)
+    nonlinear = report["nonlinear_relationship_screening"]
+    x_quadratic = next(
+        item for item in nonlinear["quadratic_feature_screens"]
+        if item["feature"] == "x"
+    )
+    interaction = nonlinear["pairwise_interaction_screens"][0]
+
+    assert x_quadratic["quadratic_r2_gain"] > 0.1
+    assert interaction["interaction_r2_gain"] > 0
+    assert len(report["feature_target_relationships"]) == 2
+    assert "not a significance test" in nonlinear["method"]
+
+
+def test_linear_baseline_residual_diagnostics_use_complete_numeric_rows():
+    """Residual checks fit a numeric linear baseline and report sample limits."""
+    x = np.arange(12, dtype=float)
+    z = np.arange(12, dtype=float) ** 2
+    data = pd.DataFrame(
+        {"x": x, "z": z, "target": 3 * x - 2 * z + 5}
+    )
+    data.loc[0, "z"] = np.nan
+
+    report = _report(data)
+    residuals = report["linear_baseline_residual_diagnostics"]
+
+    assert residuals["available"] is True
+    assert residuals["complete_case_sample_count"] == 11
+    assert residuals["in_sample_r2"] == pytest.approx(1.0)
+    assert residuals["in_sample_rmse"] == pytest.approx(0.0, abs=1e-10)
+    assert residuals["residual_degrees_of_freedom"] == 8
+
+
+def test_added_sections_return_explicit_limitations_without_numeric_predictors():
+    """Unsupported-only features do not cause invented numeric diagnostics."""
+    report = _report(
+        pd.DataFrame(
+            {"category": ["red", "blue", "red"], "target": [1, 2, 3]}
+        )
+    )
+
+    assert report["feature_target_mutual_information"]["features"] == []
+    assert report["nonlinear_relationship_screening"][
+        "quadratic_feature_screens"
+    ] == []
+    assert report["nonlinear_relationship_screening"][
+        "pairwise_interaction_screens"
+    ] == []
+    assert report["linear_baseline_residual_diagnostics"]["available"] is False
+    assert report["linear_baseline_residual_diagnostics"]["limitation"] == (
+        "no_numeric_predictors"
+    )
+    assert report["feature_cardinality_and_effective_sample_ratio"][
+        "effective_sample_to_numeric_feature_ratio"
+    ]["ratio"] is None
+
+
 def test_missing_target_column_raises_clear_error():
     """A missing requested target raises ValueError naming the target."""
     with pytest.raises(ValueError, match="Target column 'missing' was not found"):

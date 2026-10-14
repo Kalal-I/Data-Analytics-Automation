@@ -8,8 +8,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.linear_model import LinearRegression
 
-from dataset_stats.column_analysis import analyze_column
+from column_analysis import analyze_column
 
 DEFAULT_CORRELATION_THRESHOLD = 0.8
 _PEARSON_NEAR_CONSTANT_ULPS = 1 + 4 * np.finfo(float).eps
@@ -294,6 +296,482 @@ def _feature_pair_relationships(
     return relationships, highly_correlated_pairs
 
 
+def _normalized(values: np.ndarray) -> tuple[np.ndarray, float]:
+    """Scale finite values to avoid overflow in diagnostic calculations."""
+    scale = float(np.max(np.abs(values))) if len(values) else 0.0
+    if scale == 0:
+        return np.zeros_like(values, dtype="float64"), 0.0
+    return values / scale, scale
+
+
+def _distribution_summary(values: pd.Series, name: str) -> dict[str, Any]:
+    """Summarize valid numeric observations and IQR-rule outliers."""
+    finite = values.dropna().to_numpy(dtype="float64")
+    result: dict[str, Any] = {
+        "name": name,
+        "valid_observation_count": int(len(finite)),
+        "skewness": None,
+        "quantiles": {},
+        "outliers": {
+            "method": "Tukey 1.5-IQR fences",
+            "lower_fence": None,
+            "upper_fence": None,
+            "count": None,
+        },
+        "variance": None,
+    }
+    if not len(finite):
+        result["limitation"] = "no_finite_numeric_observations"
+        return result
+
+    normalized, scale = _normalized(finite)
+    quantile_probabilities = {
+        "q05": 0.05,
+        "q25": 0.25,
+        "q50": 0.50,
+        "q75": 0.75,
+        "q95": 0.95,
+    }
+    normalized_quantiles = {
+        label: float(np.quantile(normalized, probability))
+        for label, probability in quantile_probabilities.items()
+    }
+    result["quantiles"] = {
+        label: _finite_float(value * scale)
+        for label, value in normalized_quantiles.items()
+    }
+    q25 = normalized_quantiles["q25"]
+    q75 = normalized_quantiles["q75"]
+    iqr = q75 - q25
+    lower_normalized = q25 - 1.5 * iqr
+    upper_normalized = q75 + 1.5 * iqr
+    result["outliers"] = {
+        "method": "Tukey 1.5-IQR fences",
+        "lower_fence": _finite_float(lower_normalized * scale),
+        "upper_fence": _finite_float(upper_normalized * scale),
+        "count": int(
+            np.count_nonzero(
+                (normalized < lower_normalized) | (normalized > upper_normalized)
+            )
+        ),
+    }
+    variance_normalized = float(np.var(normalized, ddof=0))
+    result["variance"] = _finite_float(variance_normalized * scale * scale)
+    if len(normalized) >= 3 and variance_normalized > 0:
+        mean = float(np.mean(normalized))
+        standard_deviation = math.sqrt(variance_normalized)
+        result["skewness"] = _finite_float(
+            float(np.mean(((normalized - mean) / standard_deviation) ** 3))
+        )
+    else:
+        result["skewness_limitation"] = (
+            "fewer_than_three_observations"
+            if len(normalized) < 3
+            else "constant_values"
+        )
+    return result
+
+
+def _feature_distribution_summaries(
+    target_column: str,
+    target_values: pd.Series,
+    numeric_predictors: dict[Any, pd.Series],
+) -> dict[str, Any]:
+    return {
+        "target": _distribution_summary(target_values, target_column),
+        "features": [
+            _distribution_summary(values, str(name))
+            for name, values in numeric_predictors.items()
+        ],
+    }
+
+
+def _mutual_information_summaries(
+    numeric_predictors: dict[Any, pd.Series],
+    target_values: pd.Series,
+) -> dict[str, Any]:
+    """Estimate numeric feature-target mutual information deterministically."""
+    summaries: list[dict[str, Any]] = []
+    for name, values in numeric_predictors.items():
+        paired = pd.concat(
+            [values.reset_index(drop=True), target_values.reset_index(drop=True)],
+            axis=1,
+        ).dropna()
+        x = paired.iloc[:, 0].to_numpy(dtype="float64")
+        y = paired.iloc[:, 1].to_numpy(dtype="float64")
+        summary: dict[str, Any] = {
+            "feature": str(name),
+            "mutual_information": None,
+            "valid_paired_observation_count": int(len(paired)),
+            "method": "sklearn mutual_info_regression",
+            "limitation": None,
+        }
+        if len(paired) < 3:
+            summary["limitation"] = "fewer_than_three_valid_pairs"
+        elif np.unique(x).size < 2 or np.unique(y).size < 2:
+            summary["limitation"] = "constant_feature_or_target"
+        else:
+            x_scaled, _ = _normalized(x)
+            y_scaled, _ = _normalized(y)
+            estimate = mutual_info_regression(
+                x_scaled.reshape(-1, 1),
+                y_scaled,
+                discrete_features=False,
+                n_neighbors=min(3, len(paired) - 1),
+                random_state=0,
+            )[0]
+            summary["mutual_information"] = _finite_float(estimate)
+            if summary["mutual_information"] is None:
+                summary["limitation"] = "mutual_information_is_non_finite"
+        summaries.append(summary)
+    return {
+        "method": (
+            "Non-negative k-nearest-neighbor estimate for numerical predictors; "
+            "values are not directly comparable across sample sizes."
+        ),
+        "features": summaries,
+    }
+
+
+def _feature_cardinality_and_missingness(
+    data: pd.DataFrame,
+    target_column: str,
+    target_values: pd.Series,
+    numeric_predictors: dict[Any, pd.Series],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Report raw feature cardinality, effective sample size, and missingness."""
+    cardinality: list[dict[str, Any]] = []
+    for column in data.columns:
+        if column == target_column:
+            continue
+        analysis = analyze_column(data[column].reset_index(drop=True))
+        cardinality.append(
+            {
+                "feature": str(column),
+                "detected_type": analysis.detected_type,
+                "unique_non_missing_count": analysis.unique_non_missing_count,
+                "non_missing_count": int(len(data) - analysis.missing_count),
+                "cardinality_ratio": (
+                    _finite_float(
+                        analysis.unique_non_missing_count
+                        / (len(data) - analysis.missing_count)
+                    )
+                    if len(data) > analysis.missing_count
+                    else None
+                ),
+            }
+        )
+
+    numeric_feature_count = len(numeric_predictors)
+    complete_case_count = 0
+    if numeric_feature_count:
+        complete = pd.DataFrame(
+            {
+                str(name): values.reset_index(drop=True)
+                for name, values in numeric_predictors.items()
+            }
+        )
+        complete[target_column] = target_values.reset_index(drop=True)
+        complete_case_count = int(complete.dropna().shape[0])
+    ratio = (
+        _finite_float(complete_case_count / numeric_feature_count)
+        if numeric_feature_count
+        else None
+    )
+    cardinality_report = {
+        "features": cardinality,
+        "effective_sample_to_numeric_feature_ratio": {
+            "complete_case_sample_count": complete_case_count,
+            "numeric_feature_count": numeric_feature_count,
+            "ratio": ratio,
+            "limitation": (
+                None
+                if numeric_feature_count
+                else "no_numeric_predictors"
+            ),
+        },
+    }
+
+    missingness = data.isna()
+    pattern_counts: dict[tuple[str, ...], int] = {}
+    for row in missingness.itertuples(index=False, name=None):
+        pattern = tuple(
+            str(column) for column, is_missing in zip(data.columns, row) if is_missing
+        )
+        pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+    pattern_report = {
+        "columns": [
+            {
+                "feature": str(column),
+                "missing_count": int(missingness[column].sum()),
+                "missing_percentage": _finite_float(
+                    100.0 * float(missingness[column].mean())
+                ),
+            }
+            for column in data.columns
+        ],
+        "row_patterns": [
+            {
+                "missing_features": list(pattern),
+                "row_count": count,
+            }
+            for pattern, count in sorted(
+                pattern_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
+    }
+    return cardinality_report, pattern_report
+
+
+def _feature_scale_summaries(
+    numeric_predictors: dict[Any, pd.Series],
+    target_column: str,
+    target_values: pd.Series,
+) -> dict[str, Any]:
+    """Summarize location and scale for numeric columns without imputing."""
+    summaries: list[dict[str, Any]] = []
+    for name, values in [(target_column, target_values), *numeric_predictors.items()]:
+        finite = values.dropna().to_numpy(dtype="float64")
+        summary: dict[str, Any] = {
+            "name": str(name),
+            "valid_observation_count": int(len(finite)),
+            "minimum": None,
+            "maximum": None,
+            "mean": None,
+            "standard_deviation": None,
+            "range": None,
+        }
+        if len(finite):
+            normalized, scale = _normalized(finite)
+            minimum = float(np.min(normalized))
+            maximum = float(np.max(normalized))
+            mean = float(np.mean(normalized))
+            standard_deviation = float(np.std(normalized, ddof=0))
+            summary.update(
+                {
+                    "minimum": _finite_float(minimum * scale),
+                    "maximum": _finite_float(maximum * scale),
+                    "mean": _finite_float(mean * scale),
+                    "standard_deviation": _finite_float(standard_deviation * scale),
+                    "range": _finite_float((maximum - minimum) * scale),
+                }
+            )
+        else:
+            summary["limitation"] = "no_finite_numeric_observations"
+        summaries.append(summary)
+    return {"columns": summaries}
+
+
+def _nonlinear_relationship_screening(
+    numeric_predictors: dict[Any, pd.Series],
+    target_values: pd.Series,
+) -> dict[str, Any]:
+    """Screen quadratic and pairwise interaction terms using in-sample R²."""
+    quadratic_results: list[dict[str, Any]] = []
+    valid_columns: list[tuple[Any, pd.Series]] = []
+    for name, values in numeric_predictors.items():
+        paired = pd.concat(
+            [values.reset_index(drop=True), target_values.reset_index(drop=True)],
+            axis=1,
+        ).dropna()
+        x = paired.iloc[:, 0].to_numpy(dtype="float64")
+        y = paired.iloc[:, 1].to_numpy(dtype="float64")
+        result: dict[str, Any] = {
+            "feature": str(name),
+            "valid_paired_observation_count": int(len(paired)),
+            "linear_r2": None,
+            "quadratic_r2": None,
+            "quadratic_r2_gain": None,
+            "limitation": None,
+        }
+        if len(paired) < 5:
+            result["limitation"] = "fewer_than_five_valid_pairs"
+        elif np.unique(x).size < 3 or np.unique(y).size < 2:
+            result["limitation"] = "insufficient_feature_or_target_variation"
+        else:
+            x_scaled, _ = _normalized(x)
+            y_scaled, _ = _normalized(y)
+            linear = LinearRegression().fit(x_scaled.reshape(-1, 1), y_scaled)
+            quadratic_design = np.column_stack([x_scaled, x_scaled**2])
+            quadratic = LinearRegression().fit(quadratic_design, y_scaled)
+            linear_r2 = _finite_float(linear.score(x_scaled.reshape(-1, 1), y_scaled))
+            quadratic_r2 = _finite_float(quadratic.score(quadratic_design, y_scaled))
+            result.update(
+                {
+                    "linear_r2": linear_r2,
+                    "quadratic_r2": quadratic_r2,
+                    "quadratic_r2_gain": (
+                        _finite_float(quadratic_r2 - linear_r2)
+                        if linear_r2 is not None and quadratic_r2 is not None
+                        else None
+                    ),
+                }
+            )
+        quadratic_results.append(result)
+        valid_columns.append((name, values))
+
+    interactions: list[dict[str, Any]] = []
+    for (left_name, left_values), (right_name, right_values) in combinations(
+        valid_columns, 2
+    ):
+        paired = pd.concat(
+            [
+                left_values.reset_index(drop=True),
+                right_values.reset_index(drop=True),
+                target_values.reset_index(drop=True),
+            ],
+            axis=1,
+        ).dropna()
+        left = paired.iloc[:, 0].to_numpy(dtype="float64")
+        right = paired.iloc[:, 1].to_numpy(dtype="float64")
+        y = paired.iloc[:, 2].to_numpy(dtype="float64")
+        result = {
+            "feature_1": str(left_name),
+            "feature_2": str(right_name),
+            "valid_observation_count": int(len(paired)),
+            "additive_r2": None,
+            "interaction_r2": None,
+            "interaction_r2_gain": None,
+            "limitation": None,
+        }
+        if len(paired) < 5:
+            result["limitation"] = "fewer_than_five_valid_observations"
+        elif (
+            np.unique(left).size < 2
+            or np.unique(right).size < 2
+            or np.unique(y).size < 2
+        ):
+            result["limitation"] = "constant_feature_or_target"
+        else:
+            left_scaled, _ = _normalized(left)
+            right_scaled, _ = _normalized(right)
+            y_scaled, _ = _normalized(y)
+            additive_design = np.column_stack([left_scaled, right_scaled])
+            interaction_design = np.column_stack(
+                [left_scaled, right_scaled, left_scaled * right_scaled]
+            )
+            additive = LinearRegression().fit(additive_design, y_scaled)
+            interaction = LinearRegression().fit(interaction_design, y_scaled)
+            additive_r2 = _finite_float(additive.score(additive_design, y_scaled))
+            interaction_r2 = _finite_float(
+                interaction.score(interaction_design, y_scaled)
+            )
+            result.update(
+                {
+                    "additive_r2": additive_r2,
+                    "interaction_r2": interaction_r2,
+                    "interaction_r2_gain": (
+                        _finite_float(interaction_r2 - additive_r2)
+                        if additive_r2 is not None and interaction_r2 is not None
+                        else None
+                    ),
+                }
+            )
+        interactions.append(result)
+
+    return {
+        "method": (
+            "In-sample R² gain from adding a univariate quadratic term or a "
+            "pairwise product term to the corresponding linear/additive model. "
+            "This is a screening heuristic, not a significance test."
+        ),
+        "quadratic_feature_screens": quadratic_results,
+        "pairwise_interaction_screens": interactions,
+    }
+
+
+def _linear_baseline_residual_diagnostics(
+    numeric_predictors: dict[Any, pd.Series],
+    target_values: pd.Series,
+) -> dict[str, Any]:
+    """Fit a complete-case numeric baseline and summarize its residuals."""
+    if not numeric_predictors:
+        return {
+            "available": False,
+            "limitation": "no_numeric_predictors",
+            "complete_case_sample_count": 0,
+            "numeric_feature_count": 0,
+        }
+
+    x_frame = pd.DataFrame(
+        {
+            str(name): values.reset_index(drop=True)
+            for name, values in numeric_predictors.items()
+        }
+    )
+    y_series = target_values.reset_index(drop=True)
+    complete = pd.concat([x_frame, y_series.rename("__target__")], axis=1).dropna()
+    feature_count = len(numeric_predictors)
+    sample_count = len(complete)
+    base_report = {
+        "available": False,
+        "complete_case_sample_count": sample_count,
+        "numeric_feature_count": feature_count,
+    }
+    if sample_count < 3:
+        return {
+            **base_report,
+            "limitation": "fewer_than_three_complete_cases",
+        }
+
+    x = complete.iloc[:, :-1].to_numpy(dtype="float64")
+    y = complete.iloc[:, -1].to_numpy(dtype="float64")
+    if np.unique(y).size < 2:
+        return {**base_report, "limitation": "constant_target"}
+
+    x_scaled = np.column_stack([_normalized(x[:, index])[0] for index in range(x.shape[1])])
+    y_scaled, y_scale = _normalized(y)
+    model = LinearRegression().fit(x_scaled, y_scaled)
+    predictions = model.predict(x_scaled)
+    residuals = y_scaled - predictions
+    residual_variance = float(np.var(residuals, ddof=0))
+    fitted_variance = float(np.var(predictions, ddof=0))
+    residual_skewness = None
+    standardized_outlier_count = None
+    if residual_variance > 0:
+        residual_std = math.sqrt(residual_variance)
+        standardized_residuals = residuals / residual_std
+        standardized_outlier_count = int(
+            np.count_nonzero(np.abs(standardized_residuals) > 3)
+        )
+        residual_skewness = _finite_float(
+            float(
+                np.mean(
+                    ((residuals - float(np.mean(residuals))) / residual_std) ** 3
+                )
+            )
+        )
+    absolute_residual_correlation, paired_count, limitation = _correlation(
+        pd.Series(np.abs(residuals)),
+        pd.Series(predictions),
+        "pearson",
+    )
+    return {
+        **base_report,
+        "available": True,
+        "method": "LinearRegression fit on all complete numeric rows (in-sample)",
+        "in_sample_r2": _finite_float(model.score(x_scaled, y_scaled)),
+        "in_sample_mae": _finite_float(float(np.mean(np.abs(residuals))) * y_scale),
+        "in_sample_rmse": _finite_float(math.sqrt(residual_variance) * y_scale),
+        "residual_mean": _finite_float(float(np.mean(residuals)) * y_scale),
+        "residual_standard_deviation": _finite_float(
+            math.sqrt(residual_variance) * y_scale
+        ),
+        "residual_skewness": residual_skewness,
+        "standardized_residual_outlier_count": standardized_outlier_count,
+        "absolute_residual_fitted_correlation": absolute_residual_correlation,
+        "absolute_residual_fitted_correlation_pair_count": paired_count,
+        "absolute_residual_fitted_correlation_limitation": limitation,
+        "residual_degrees_of_freedom": max(sample_count - feature_count - 1, 0),
+        "residual_degrees_of_freedom_limitation": (
+            None
+            if sample_count > feature_count + 1
+            else "no_positive_residual_degrees_of_freedom"
+        ),
+        "fitted_value_variance": _finite_float(fitted_variance * y_scale * y_scale),
+    }
+
+
 def _build_warnings(
     target_report: dict[str, Any],
     relationships: list[dict[str, Any]],
@@ -339,7 +817,7 @@ def generate_model_statistics(
     target_column: str,
     correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
 ) -> str:
-    """Return strict JSON with regression-specific correlations and limitations.
+    """Return strict JSON with regression statistics and diagnostic screens.
 
     Native numeric columns are numerical. For object/string columns, more than
     half of non-missing cells must parse as numeric (finite or non-finite) for
@@ -358,6 +836,11 @@ def generate_model_statistics(
 
     Target numeric validity is reported separately from regression suitability:
     target-only statistics cannot establish that regression is appropriate.
+    Added distribution, mutual-information, cardinality, scale, nonlinear,
+    interaction, and residual sections supplement rather than replace the
+    original correlation evidence. Nonlinear screens and residual diagnostics
+    are in-sample heuristics, not significance tests or estimates of
+    out-of-sample performance.
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame.")
@@ -397,6 +880,24 @@ def generate_model_statistics(
     feature_feature_relationships, highly_correlated_pairs = (
         _feature_pair_relationships(numeric_predictors, threshold)
     )
+    distributions = _feature_distribution_summaries(
+        target_column, target_values, numeric_predictors
+    )
+    mutual_information = _mutual_information_summaries(
+        numeric_predictors, target_values
+    )
+    cardinality, missingness = _feature_cardinality_and_missingness(
+        data, target_column, target_values, numeric_predictors
+    )
+    scale_summaries = _feature_scale_summaries(
+        numeric_predictors, target_column, target_values
+    )
+    nonlinear_screening = _nonlinear_relationship_screening(
+        numeric_predictors, target_values
+    )
+    residual_diagnostics = _linear_baseline_residual_diagnostics(
+        numeric_predictors, target_values
+    )
     warnings = _build_warnings(target_report, relationships)
 
     result = {
@@ -411,6 +912,19 @@ def generate_model_statistics(
             "threshold_is_heuristic": True,
             "highly_correlated_pairs": highly_correlated_pairs,
         },
+        "distribution_summaries": distributions,
+        "feature_target_mutual_information": mutual_information,
+        "feature_cardinality_and_effective_sample_ratio": cardinality,
+        "feature_scale_summaries": scale_summaries,
+        "missingness_patterns": missingness,
+        "nonlinear_relationship_screening": nonlinear_screening,
+        "linear_baseline_residual_diagnostics": residual_diagnostics,
+        "diagnostic_interpretation": (
+            "Mutual information, nonlinear/interaction screens, and residual "
+            "diagnostics use numeric values only. The nonlinear, interaction, "
+            "and residual diagnostics are in-sample heuristics and do not "
+            "establish statistical significance or out-of-sample performance."
+        ),
         "warnings": warnings,
         "interpretation": (
             "Correlations describe association, not causation, and do not "
@@ -419,3 +933,10 @@ def generate_model_statistics(
         ),
     }
     return json.dumps(result, indent=2, allow_nan=False)
+
+
+if __name__ == "__main__":
+    df = pd.read_csv(
+        r"D:\Kavin\College work\Sem 5\ML\package\Data-Analytics-Automation\multiple_regression_suitable.csv"
+    )
+    print(generate_model_statistics(df, "Price_USD"))
