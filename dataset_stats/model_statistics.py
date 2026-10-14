@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.linear_model import LinearRegression
 
-from column_analysis import analyze_column
+from dataset_stats.column_analysis import analyze_column
 
 DEFAULT_CORRELATION_THRESHOLD = 0.8
 _PEARSON_NEAR_CONSTANT_ULPS = 1 + 4 * np.finfo(float).eps
@@ -160,7 +160,9 @@ def _initial_feature_limitation(
 
 
 def _collect_features(
-    data: pd.DataFrame, target_column: str
+    data: pd.DataFrame,
+    target_column: str,
+    one_hot_encoded_features: set[str],
 ) -> tuple[
     list[dict[str, Any]],
     dict[Any, pd.Series],
@@ -198,6 +200,22 @@ def _collect_features(
                 analysis.precision_loss_count,
             ),
         }
+        if column in one_hot_encoded_features:
+            finite_values = numeric_values.dropna()
+            binary_values_verified = bool(
+                not finite_values.empty
+                and finite_values.isin([0.0, 1.0]).all()
+            )
+            feature_report["encoding"] = {
+                "type": "one_hot_binary",
+                "binary_values_verified": binary_values_verified,
+                "instruction": (
+                    "Treat as a one-hot binary variable. Preserve valid "
+                    "target associations, mutual information, and pairwise "
+                    "correlations; qualify statistics whose assumptions do "
+                    "not fit binary data."
+                ),
+            }
         features.append(feature_report)
         feature_reports[column] = feature_report
         if is_numeric_candidate:
@@ -565,8 +583,10 @@ def _feature_scale_summaries(
 def _nonlinear_relationship_screening(
     numeric_predictors: dict[Any, pd.Series],
     target_values: pd.Series,
+    one_hot_encoded_features: set[str] | None = None,
 ) -> dict[str, Any]:
     """Screen quadratic and pairwise interaction terms using in-sample R²."""
+    one_hot_encoded_features = one_hot_encoded_features or set()
     quadratic_results: list[dict[str, Any]] = []
     valid_columns: list[tuple[Any, pd.Series]] = []
     for name, values in numeric_predictors.items():
@@ -584,9 +604,20 @@ def _nonlinear_relationship_screening(
             "quadratic_r2_gain": None,
             "limitation": None,
         }
+        if str(name) in one_hot_encoded_features:
+            result["encoding"] = "one_hot_binary"
         if len(paired) < 5:
             result["limitation"] = "fewer_than_five_valid_pairs"
-        elif np.unique(x).size < 3 or np.unique(y).size < 2:
+        elif np.unique(x).size < 2 or np.unique(y).size < 2:
+            result["limitation"] = "insufficient_feature_or_target_variation"
+        elif (
+            str(name) in one_hot_encoded_features
+            and np.isin(np.unique(x), [0.0, 1.0]).all()
+        ):
+            # For a 0/1 variable, x squared equals x, so the quadratic adds no
+            # new information beyond the existing linear term.
+            result["limitation"] = "quadratic_term_redundant_for_binary_feature"
+        elif np.unique(x).size < 3:
             result["limitation"] = "insufficient_feature_or_target_variation"
         else:
             x_scaled, _ = _normalized(x)
@@ -816,6 +847,9 @@ def generate_model_statistics(
     data: pd.DataFrame,
     target_column: str,
     correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
+    one_hot_encoded_features: (
+        list[str] | tuple[str, ...] | set[str] | frozenset[str] | None
+    ) = None,
 ) -> str:
     """Return strict JSON with regression statistics and diagnostic screens.
 
@@ -841,6 +875,12 @@ def generate_model_statistics(
     original correlation evidence. Nonlinear screens and residual diagnostics
     are in-sample heuristics, not significance tests or estimates of
     out-of-sample performance.
+
+    ``one_hot_encoded_features`` lists predictor column names created by
+    one-hot encoding. They remain included in valid association, mutual
+    information, and pairwise correlation calculations. Verified 0/1 features
+    are explicitly excluded from quadratic-term comparisons because squaring
+    them duplicates their linear values.
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame.")
@@ -870,9 +910,36 @@ def generate_model_statistics(
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("correlation_threshold must be finite and between 0 and 1.")
 
+    if one_hot_encoded_features is None:
+        encoded_features: list[str] = []
+    elif isinstance(one_hot_encoded_features, (set, frozenset)):
+        encoded_features = sorted(one_hot_encoded_features)
+    elif isinstance(one_hot_encoded_features, (list, tuple)):
+        encoded_features = list(one_hot_encoded_features)
+    else:
+        raise TypeError(
+            "one_hot_encoded_features must be a list, tuple, set, or None."
+        )
+    if not all(isinstance(name, str) for name in encoded_features):
+        raise TypeError("Every one-hot encoded feature name must be a string.")
+    if len(encoded_features) != len(set(encoded_features)):
+        raise ValueError("one_hot_encoded_features must not contain duplicates.")
+    missing_encoded_features = [
+        name for name in encoded_features if name not in data.columns
+    ]
+    if missing_encoded_features:
+        raise ValueError(
+            "One-hot encoded feature columns not found in data: {!r}.".format(
+                missing_encoded_features
+            )
+        )
+    if target_column in encoded_features:
+        raise ValueError("The target column cannot be a one-hot encoded feature.")
+    encoded_feature_set = set(encoded_features)
+
     target_report, target_values = _target_report(data[target_column])
     features, numeric_predictors, feature_reports = _collect_features(
-        data, target_column
+        data, target_column, encoded_feature_set
     )
     relationships = _feature_target_relationships(
         numeric_predictors, target_values, feature_reports
@@ -893,15 +960,40 @@ def generate_model_statistics(
         numeric_predictors, target_column, target_values
     )
     nonlinear_screening = _nonlinear_relationship_screening(
-        numeric_predictors, target_values
+        numeric_predictors, target_values, encoded_feature_set
     )
     residual_diagnostics = _linear_baseline_residual_diagnostics(
         numeric_predictors, target_values
     )
     warnings = _build_warnings(target_report, relationships)
+    binary_validation = {
+        name: bool(feature_reports[name]["encoding"]["binary_values_verified"])
+        for name in encoded_features
+    }
+    for name, is_binary in binary_validation.items():
+        if not is_binary:
+            warnings.append(
+                "Feature {!r} was declared one-hot encoded, but its available "
+                "finite numeric values are not verified as binary 0/1; "
+                "interpret binary-specific guidance cautiously.".format(name)
+            )
 
     result = {
         "schema_version": 1,
+        "encoding_metadata": {
+            "one_hot_encoded_features": encoded_features,
+            "binary_values_verified": binary_validation,
+            "instruction": (
+                "Treat these features as one-hot-encoded binary variables, "
+                "not continuous numerical variables. Use their statistics "
+                "only where statistically appropriate. Do not discard valid "
+                "binary-feature statistics such as target associations, "
+                "mutual information, or pairwise correlations. Ignore or "
+                "qualify statistics whose assumptions are inappropriate for "
+                "binary variables. Do not assume that every statistic "
+                "calculated for these features is invalid."
+            ),
+        },
         "target": target_report,
         "features": features,
         "feature_target_relationships": relationships,
@@ -933,10 +1025,3 @@ def generate_model_statistics(
         ),
     }
     return json.dumps(result, indent=2, allow_nan=False)
-
-
-if __name__ == "__main__":
-    df = pd.read_csv(
-        r"D:\Kavin\College work\Sem 5\ML\package\Data-Analytics-Automation\multiple_regression_suitable.csv"
-    )
-    print(generate_model_statistics(df, "Price_USD"))
