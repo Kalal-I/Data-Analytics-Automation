@@ -1,5 +1,9 @@
+import json
+
 from dataset_stats.description import generate_report
+from dataset_stats.model_statistics import generate_model_statistics
 from dataset_stats.open_file import read_csv_files
+from agents_code.linear_regression_agent import linear_regression_agent
 from agents_code.preprocessing_agent import preprocessing_agent
 from preproccessing.drop_rows_with_missing_values import remove_missing_values
 from preproccessing.impute_missing_values import (
@@ -69,3 +73,17 @@ while True:
                     encoded_columns.add(column)
 print("Preprocessing completed. The processed DataFrame is:")
 print(df)
+
+dataset_description = json.loads(generate_report(df, path, target))
+statistics = json.loads(generate_model_statistics(df, target))
+label_type = dataset_description["Reports"][0]["Target column"]["Type"]
+
+regression_recommendation = linear_regression_agent(
+    dataset_description=dataset_description,
+    target_column=target,
+    label_type=label_type,
+    statistics=statistics,
+    row_count=len(df),
+)
+print("Linear regression agent returned:")
+print(regression_recommendation)

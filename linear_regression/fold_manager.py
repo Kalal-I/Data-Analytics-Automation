@@ -11,6 +11,7 @@ from sklearn.model_selection import KFold, train_test_split
 from linear_regression.split_data import (
     _data_fingerprint,
     _selected_features,
+    _validate_saved_folds,
     split_and_train,
 )
 
@@ -53,6 +54,7 @@ def create_or_load_folds(
                 "Saved folds belong to different data or row ordering. "
                 "Use another fold file to create a new assignment."
             )
+        _validate_saved_folds(data, stored)
         return stored
 
     train_indices, test_indices = train_test_split(
