@@ -54,11 +54,43 @@ uses the column's values, not values remaining after duplicate rows are removed.
 
 Provides `generate_model_statistics(data, target_column, correlation_threshold=0.8)`,
 which returns strict JSON containing regression-specific evidence rather than
-repeating the general dataset profile above. It reports target numeric
-validity (without claiming target-only evidence can establish suitability),
-feature-target Pearson and Spearman correlations, paired observation counts,
-and numeric-predictor pairs whose absolute Pearson correlation meets the
-configurable heuristic threshold.
+repeating the general dataset profile above. Alongside the existing fields, it
+reports target numeric validity (without claiming target-only evidence can
+establish suitability), feature-target Pearson and Spearman correlations,
+paired observation counts, and numeric-predictor pairs whose absolute Pearson
+correlation meets the configurable heuristic threshold. The original fields
+and correlation metrics remain present; added metrics are separate top-level
+sections:
+
+- `distribution_summaries`: skewness, selected quantiles, Tukey 1.5-IQR
+  outlier fences/counts, and population variance for the target and usable
+  numeric predictors.
+- `feature_target_mutual_information`: deterministic k-nearest-neighbor
+  estimates for numeric feature-target pairs. Estimates are non-negative and
+  sample-size dependent; categorical predictors are not encoded or included.
+- `feature_cardinality_and_effective_sample_ratio`: non-missing cardinality
+  for every predictor, plus the ratio of rows complete across the target and
+  all numerically detected predictors to the number of numeric predictors.
+- `feature_scale_summaries`: minimum, maximum, mean, standard deviation, and
+  range for numeric target/predictor values.
+- `missingness_patterns`: per-column missing counts/percentages and the count
+  of rows for each combination of columns missing values.
+- `nonlinear_relationship_screening`: in-sample R² gain from univariate
+  quadratic terms and pairwise product terms, with incomplete/constant input
+  limitations reported explicitly.
+- `linear_baseline_residual_diagnostics`: a linear baseline fit using all
+  complete rows of the target and numerically detected predictors, with
+  in-sample fit and residual summaries. This is diagnostic evidence, not a
+  holdout evaluation; standardized residual outliers use an absolute
+  three-standard-deviation cutoff.
+
+Distribution and relationship calculations use the existing safe numeric
+conversion policy and exclude missing, invalid, non-finite, and
+precision-loss values. The nonlinear/interaction screens and baseline
+residuals are exploratory in-sample heuristics; they are not significance
+tests and do not estimate out-of-sample performance. Missing values are
+reported, not imputed, and categorical features remain visible in cardinality
+and missingness summaries without being treated as numeric predictors.
 
 Native numeric predictors are treated as numerical. A string/object predictor
 is treated as numerical only when strictly more than half of its non-missing
@@ -81,8 +113,8 @@ small variations are meaningful for a particular domain or instrument. Target
 and feature counts separately report missing, invalid, non-finite, and
 precision-loss cells.
 
-The function does not modify the input DataFrame, train or compare models, or
-select features. Correlation is association, not causation or a guarantee of
+The function does not modify the input DataFrame, compare models, or select
+features. Correlation is association, not causation or a guarantee of
 predictive value.
 
 ```python
