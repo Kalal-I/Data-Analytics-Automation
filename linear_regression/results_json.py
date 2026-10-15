@@ -195,6 +195,9 @@ def split_result_to_json(
                 )
             ],
         }
+    report["feature_removal_tests"] = getattr(
+        model, "feature_removal_tests_", []
+    )
     try:
         return json.dumps(report, indent=2, allow_nan=False)
     except (TypeError, ValueError) as error:
