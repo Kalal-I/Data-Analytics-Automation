@@ -4,7 +4,11 @@ from dataset_stats.description import generate_report
 from dataset_stats.model_statistics import generate_model_statistics
 from dataset_stats.open_file import read_csv_files
 from agents_code.linear_regression_agent import linear_regression_agent
+from agents_code.feature_optimization_linear_model import (
+    feature_optimization_linear_model_agent,
+)
 from agents_code.preprocessing_agent import preprocessing_agent
+from linear_regression import create_folds_and_train, split_result_to_json
 from preproccessing.drop_rows_with_missing_values import remove_missing_values
 from preproccessing.impute_missing_values import (
     fill_missing_values,
@@ -97,3 +101,24 @@ regression_recommendation = linear_regression_agent(
 )
 print("Linear regression agent returned:")
 print(regression_recommendation)
+
+ranked_models = regression_recommendation["ranked_models"]
+if ranked_models and ranked_models[0]["model_name"] == "LinearRegression":
+    linear_regression_result = create_folds_and_train(
+        df,
+        target_column=target,
+        folds_file= "linear_regression/folds.json", 
+    )
+    linear_regression_report = split_result_to_json(
+        linear_regression_result,
+        target_column=target,
+    )
+    print("LinearRegression training and cross-validation metrics:")
+    print(linear_regression_report)
+    feature_optimization_recommendation = (
+        feature_optimization_linear_model_agent(
+            json.loads(linear_regression_report)
+        )
+    )
+    print("Feature optimization agent returned:")
+    print(feature_optimization_recommendation)
