@@ -122,3 +122,19 @@ if ranked_models and ranked_models[0]["model_name"] == "LinearRegression":
     )
     print("Feature optimization agent returned:")
     print(feature_optimization_recommendation)
+    if feature_optimization_recommendation.get("action") == "remove_features":
+        remaining_features = feature_optimization_recommendation[
+            "remaining_features"
+        ]
+        optimized_linear_regression_result = create_folds_and_train(
+            df,
+            target_column=target,
+            features=remaining_features,
+            folds_file="linear_regression/folds.json",
+        )
+        optimized_linear_regression_report = split_result_to_json(
+            optimized_linear_regression_result,
+            target_column=target,
+        )
+        print("LinearRegression metrics with optimized features:")
+        print(optimized_linear_regression_report)
