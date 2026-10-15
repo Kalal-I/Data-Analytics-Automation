@@ -82,6 +82,24 @@ Use a single CSV file for the preprocessing run. The CSV loader can read
 directories, but the main preprocessing loop expects one DataFrame and is not
 set up to process a list of multiple CSV DataFrames as one run.
 
+## Linear-regression feature-removal evaluation
+
+`linear_regression.create_folds_and_train()` uses a persisted 80/20 split and
+five-fold cross-validation assignment to train the selected feature set. Its
+serialized report includes `feature_removal_tests`, which fits an additional
+five-fold evaluation for each selected feature set with that one feature
+removed. Every reduced model uses the same training folds as the full model.
+
+Each result reports cross-validation mean and population standard deviation
+for R², MAE, and RMSE. `comparison_to_current` is the reduced model's mean
+minus the full model's mean: positive R² change is better, while negative MAE
+or RMSE change is better. If removing the only feature leaves no predictors,
+the report includes null metrics and a limitation instead of attempting an
+invalid fit. A `limitation` value of `null` means the reduced model was fit and
+scored normally; a non-null value explains why it could not be evaluated.
+`feature_removal_tests` is the final top-level JSON section, after the split,
+training, and optional holdout statistics.
+
 ## Supported preprocessing operations
 
 The agent can recommend only these operations:

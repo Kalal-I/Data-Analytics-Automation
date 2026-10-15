@@ -249,7 +249,7 @@ def test_cv_and_final_fit_never_use_holdout_rows(monkeypatch):
     monkeypatch.setattr(LinearRegression, "fit", recording_fit)
     split_data.split_and_train(data, "target")
 
-    assert len(fitted_row_indexes) == 6
+    assert len(fitted_row_indexes) == 6 + (5 * 2)
     assert all(not set(expected_test_index).intersection(rows) for rows in fitted_row_indexes)
 
 
@@ -369,11 +369,22 @@ def test_split_result_serializes_model_cv_and_holdout_metrics_as_strict_json(tmp
     )
     assert report["features"] == ["x"]
     assert report["target_column"] == "target"
+    assert list(report)[-1] == "feature_removal_tests"
     assert report["data_split"]["training_row_count"] == 16
     assert report["data_split"]["holdout_row_positions"] == folds["test_indices"]
     assert len(report["data_split"]["cross_validation_folds"]) == 5
     assert report["training"]["model"] == "LinearRegression"
     assert len(report["training"]["cross_validation"]["r2"]["fold_scores"]) == 5
+    assert len(report["feature_removal_tests"]) == 1
+    removal_test = report["feature_removal_tests"][0]
+    assert removal_test["removed_feature"] == "x"
+    assert removal_test["remaining_features"] == []
+    assert removal_test["cross_validation"] == {
+        "r2": {"mean": None, "std": None},
+        "mae": {"mean": None, "std": None},
+        "rmse": {"mean": None, "std": None},
+    }
+    assert removal_test["limitation"] == "cannot_fit_without_predictor_features"
     assert report["holdout"]["row_count"] == 4
     assert set(report["holdout"]["metrics"]) == {"r2", "mae", "rmse"}
     assert len(report["holdout"]["rows"]) == 4
@@ -389,6 +400,34 @@ def test_split_result_serializes_model_cv_and_holdout_metrics_as_strict_json(tmp
         assert row["predicted"] == pytest.approx(prediction)
     assert "NaN" not in serialized
     assert "Infinity" not in serialized
+
+
+def test_feature_removal_tests_evaluate_each_feature_on_identical_folds():
+    """JSON contains each ablation and compares its metrics to the full model."""
+    result = split_and_train(
+        _sample_data(),
+        "target",
+        features=["x", "z"],
+        random_state=23,
+    )
+
+    report = json.loads(split_result_to_json(result, "target"))
+    current_metrics = report["training"]["cross_validation"]
+    tests = report["feature_removal_tests"]
+    assert len(tests) == 2
+    assert [item["removed_feature"] for item in tests] == ["x", "z"]
+    assert tests[0]["remaining_features"] == ["z"]
+    assert tests[1]["remaining_features"] == ["x"]
+    assert set(tests[0]["cross_validation"]) == {"r2", "mae", "rmse"}
+
+    for item in tests:
+        for metric in ("r2", "mae", "rmse"):
+            assert item["cross_validation"][metric]["mean"] is not None
+            assert item["cross_validation"][metric]["std"] >= 0
+            assert item["comparison_to_current"][metric + "_change"] == pytest.approx(
+                item["cross_validation"][metric]["mean"]
+                - current_metrics[metric]["mean"]
+            )
 
 
 def test_json_omits_holdout_statistics_by_default_and_includes_training_count():
