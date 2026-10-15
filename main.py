@@ -36,12 +36,14 @@ df = read_csv_files(path)
 target = input("Enter the target column name: ")
 report = ""
 encoded_columns = set()
+one_hot_encoded_features = set()
 '''if (isinstance(df,list)):
     print(df.size())
 else:
     report = generate_report(df,path,target)'''
 while True:
     report = generate_report(df,path,target)
+    print(report)
     operation_to_do = preprocessing_agent(report)
     print("Initally:")
     print(operation_to_do)
@@ -63,6 +65,8 @@ while True:
             function = PREPROCESSING_FUNCTIONS[operation["function"]]
             columns_before = set(df.columns)
             df = function(df, **operation["inputs"])
+            if operation["function"] == "one_hot_encode":
+                one_hot_encoded_features.update(set(df.columns) - columns_before)
             if operation["function"] in {
                 "one_hot_encode",
                 "label_encode",
@@ -73,9 +77,15 @@ while True:
                     encoded_columns.add(column)
 print("Preprocessing completed. The processed DataFrame is:")
 print(df)
-
+print(encoded_columns)
 dataset_description = json.loads(generate_report(df, path, target))
-statistics = json.loads(generate_model_statistics(df, target))
+statistics = json.loads(
+    generate_model_statistics(
+        df,
+        target,
+        one_hot_encoded_features=sorted(one_hot_encoded_features),
+    )
+)
 label_type = dataset_description["Reports"][0]["Target column"]["Type"]
 
 regression_recommendation = linear_regression_agent(

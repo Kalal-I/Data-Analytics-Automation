@@ -52,7 +52,7 @@ uses the column's values, not values remaining after duplicate rows are removed.
 
 ### `model_statistics.py`
 
-Provides `generate_model_statistics(data, target_column, correlation_threshold=0.8)`,
+Provides `generate_model_statistics(data, target_column, correlation_threshold=0.8, one_hot_encoded_features=None)`,
 which returns strict JSON containing regression-specific evidence rather than
 repeating the general dataset profile above. Alongside the existing fields, it
 reports target numeric validity (without claiming target-only evidence can
@@ -113,6 +113,14 @@ small variations are meaningful for a particular domain or instrument. Target
 and feature counts separately report missing, invalid, non-finite, and
 precision-loss cells.
 
+Pass names of one-hot encoded columns through `one_hot_encoded_features`.
+The output includes them and binary-feature interpretation guidance in
+`encoding_metadata`, and marks those feature reports accordingly. Binary
+target associations, mutual information, and feature-feature correlations
+remain available. For verified 0/1 features, the quadratic screen is qualified
+because squaring the feature adds no information. Declared columns are checked
+against finite 0/1 values; non-binary values produce an explicit warning.
+
 The function does not modify the input DataFrame, compare models, or select
 features. Correlation is association, not causation or a guarantee of
 predictive value.
@@ -120,7 +128,11 @@ predictive value.
 ```python
 from dataset_stats.model_statistics import generate_model_statistics
 
-statistics_json = generate_model_statistics(dataframe, "target")
+statistics_json = generate_model_statistics(
+    dataframe,
+    "target",
+    one_hot_encoded_features=["Property_Type_House", "Renovated_Yes"],
+)
 ```
 
 ## Example usage
