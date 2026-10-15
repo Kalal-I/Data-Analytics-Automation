@@ -124,6 +124,66 @@ def _cross_validation_metrics(
     return metrics
 
 
+def _feature_removal_metrics(
+    training_data: pd.DataFrame,
+    target_column: str,
+    features: list[str],
+    random_state: int,
+    cv_folds: list[dict[str, list[int]]],
+    current_metrics: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Evaluate removing each feature using the same CV row assignments."""
+    removal_tests: list[dict[str, Any]] = []
+    for removed_feature in features:
+        remaining_features = [
+            feature for feature in features if feature != removed_feature
+        ]
+        if remaining_features:
+            ablated_metrics = _cross_validation_metrics(
+                training_data,
+                target_column=target_column,
+                features=remaining_features,
+                random_state=random_state,
+                cv_folds=cv_folds,
+            )
+            cv_summary = {
+                metric: {
+                    "mean": values["mean"],
+                    "std": values["std"],
+                }
+                for metric, values in ablated_metrics.items()
+            }
+            comparisons = {
+                metric + "_change": (
+                    ablated_metrics[metric]["mean"]
+                    - current_metrics[metric]["mean"]
+                )
+                for metric in ("r2", "mae", "rmse")
+            }
+            limitation = None
+        else:
+            cv_summary = {
+                metric: {"mean": None, "std": None}
+                for metric in ("r2", "mae", "rmse")
+            }
+            comparisons = {
+                metric + "_change": None
+                for metric in ("r2", "mae", "rmse")
+            }
+            limitation = "cannot_fit_without_predictor_features"
+
+        removal_tests.append(
+            {
+                "removed_feature": removed_feature,
+                "remaining_features": remaining_features,
+                "cross_validation": cv_summary,
+                "comparison_to_current": comparisons,
+                "limitation": limitation,
+            }
+        )
+    return removal_tests
+
+
 def _validate_saved_folds(
     data: pd.DataFrame, folds: dict[str, Any]
 ) -> tuple[list[int], list[int], list[dict[str, list[int]]]]:
@@ -255,7 +315,18 @@ def split_and_train(
         train_data, test_data = train_test_split(
             data, test_size=0.2, random_state=random_state
         )
-        cv_folds = None
+        fold_splitter = KFold(
+            n_splits=5,
+            shuffle=True,
+            random_state=random_state,
+        )
+        cv_folds = [
+            {
+                "train_indices": fold_train.tolist(),
+                "validation_indices": fold_validation.tolist(),
+            }
+            for fold_train, fold_validation in fold_splitter.split(train_data)
+        ]
     else:
         train_indices, test_indices, cv_folds = _validate_saved_folds(data, folds)
         train_data = data.iloc[train_indices]
@@ -267,11 +338,20 @@ def split_and_train(
         random_state=random_state,
         cv_folds=cv_folds,
     )
+    feature_removal_tests = _feature_removal_metrics(
+        train_data,
+        target_column=target_column,
+        features=selected_features,
+        random_state=random_state,
+        cv_folds=cv_folds,
+        current_metrics=metrics,
+    )
     model = train_linear_regression(
         train_data,
         target_column=target_column,
         features=features,
     )
+    model.feature_removal_tests_ = feature_removal_tests
     return (
         model,
         test_data[selected_features].copy(),
