@@ -114,7 +114,7 @@ for optional evaluation and is not used in fitting or CV.
 
 `X_test` contains only the selected predictors. `X_test` and `y_test` retain
 their matching original DataFrame indexes. Each metric in
-`cross_validation_metrics` (`r2`, `mae`, and `rmse`) contains:
+`cross_validation_metrics` (`r2`, `adjusted_r2`, `mae`, and `rmse`) contains:
 
 ```json
 {
@@ -127,7 +127,10 @@ their matching original DataFrame indexes. Each metric in
 The standard deviation is the population standard deviation (`ddof=0`).
 At least 10 rows must be available in the training partition. Undefined or
 non-finite CV results raise an error instead of being returned as usable
-metrics.
+metrics. Adjusted R² uses each validation fold's sample count and predictor
+count; it is `null` for a fold when there are not more than one additional
+observation beyond the predictor count. In that case the adjusted R² mean and
+standard deviation are also `null`.
 
 ### `create_or_load_folds`
 
@@ -213,9 +216,11 @@ JSON (`allow_nan=False`).
 The JSON always includes the schema version, target, feature names, split
 summary (including `training_row_count`), model name, fitted intercept,
 coefficients, and cross-validation metrics. When requested, the holdout
-section contains its row count, R²/MAE/RMSE, and row-level actual and
-predicted values. R² is `null` for fewer than two observations or a constant
-holdout target; MAE and RMSE are still provided whenever defined.
+section contains its row count, R², adjusted R², MAE, RMSE, and row-level
+actual and predicted values. R² is `null` for fewer than two observations or a
+constant holdout target. Adjusted R² is `null` when R² is undefined or the
+holdout does not have more rows than the predictor count plus one. MAE and RMSE
+are still provided whenever defined.
 
 Holdout row indexes are encoded as tagged JSON values to retain identity and
 type. Supported labels are null, booleans, integers, finite floats, strings,

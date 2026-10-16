@@ -91,14 +91,24 @@ five-fold evaluation for each selected feature set with that one feature
 removed. Every reduced model uses the same training folds as the full model.
 
 Each result reports cross-validation mean and population standard deviation
-for R², MAE, and RMSE. `comparison_to_current` is the reduced model's mean
-minus the full model's mean: positive R² change is better, while negative MAE
-or RMSE change is better. If removing the only feature leaves no predictors,
+for R², adjusted R², MAE, and RMSE. Adjusted R² is `null` if the fold has no
+more observations than predictors plus one. `comparison_to_current` is the
+reduced model's mean minus the full model's mean: positive R² change is better,
+while negative MAE or RMSE change is better. If removing the only feature
+leaves no predictors,
 the report includes null metrics and a limitation instead of attempting an
 invalid fit. A `limitation` value of `null` means the reduced model was fit and
 scored normally; a non-null value explains why it could not be evaluated.
 `feature_removal_tests` is the final top-level JSON section, after the split,
 training, and optional holdout statistics.
+
+At the end of optimization, the selected report must be a fitted feature set
+within `0.005` mean cross-validation R² of the best evaluated set. Among those
+candidates, selection prioritizes higher adjusted R² when it is available for
+all candidates, then lower RMSE, lower MAE, and fewer features. If adjusted R²
+is unavailable for any eligible candidate, selection falls back to the other
+available metrics. The selected report's metric means and standard deviations
+are printed for context.
 
 ## Supported preprocessing operations
 

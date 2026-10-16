@@ -13,6 +13,7 @@ from linear_regression.fold_manager import (
     create_or_load_folds,
 )
 from linear_regression.linear_model import train_linear_regression
+from linear_regression.model_selection import select_best_feature_report
 from linear_regression.results_json import split_result_to_json
 from linear_regression.split_data import _cross_validation_metrics, split_and_train
 
@@ -21,6 +22,67 @@ def _sample_data():
     x = np.arange(20, dtype=float)
     z = np.arange(20, dtype=float) * 0.5
     return pd.DataFrame({"x": x, "z": z, "target": 3 * x - 2 * z + 5})
+
+
+def _feature_report(features, r2, adjusted_r2, rmse, mae):
+    return {
+        "features": features,
+        "training": {
+            "cross_validation": {
+                "r2": {"mean": r2, "std": 0.001},
+                "adjusted_r2": {"mean": adjusted_r2, "std": 0.001},
+                "rmse": {"mean": rmse, "std": 0.01},
+                "mae": {"mean": mae, "std": 0.01},
+            }
+        },
+    }
+
+
+def test_feature_selection_obeys_r2_tolerance_then_adjusted_r2_and_errors():
+    best_r2 = _feature_report(["a", "b", "c"], 0.91, 0.89, 2.0, 1.5)
+    better_adjusted = _feature_report(["a", "b"], 0.906, 0.90, 2.1, 1.6)
+    outside_tolerance = _feature_report(["a"], 0.904, 0.95, 1.0, 0.5)
+
+    selected, ranking_metrics = select_best_feature_report(
+        [best_r2, better_adjusted, outside_tolerance]
+    )
+
+    assert selected is better_adjusted
+    assert ranking_metrics == [
+        "r2_tolerance",
+        "adjusted_r2",
+        "rmse",
+        "mae",
+        "feature_count",
+    ]
+
+
+def test_feature_selection_uses_error_and_complexity_when_adjusted_r2_unavailable():
+    smaller = _feature_report(["a"], 0.91, None, 2.0, 1.5)
+    larger = _feature_report(["a", "b"], 0.909, 0.90, 1.9, 1.4)
+    simpler_tie = _feature_report(["c"], 0.909, None, 1.9, 1.4)
+
+    selected, ranking_metrics = select_best_feature_report(
+        [smaller, larger, simpler_tie]
+    )
+
+    assert selected is simpler_tie
+    assert ranking_metrics == [
+        "r2_tolerance",
+        "rmse",
+        "mae",
+        "feature_count",
+    ]
+
+
+def test_feature_selection_excludes_unfittable_and_undefined_r2_reports():
+    no_features = _feature_report([], 1.0, 1.0, 0.0, 0.0)
+    undefined_r2 = _feature_report(["a"], None, None, 0.0, 0.0)
+    valid = _feature_report(["a", "b"], 0.9, None, 2.0, 1.0)
+
+    selected, _ = select_best_feature_report([no_features, undefined_r2, valid])
+
+    assert selected is valid
 
 
 def test_training_defaults_to_all_predictors_and_returns_fitted_model():
@@ -66,9 +128,13 @@ def test_split_trains_on_eighty_percent_and_returns_twenty_percent_holdout():
     assert len(y_test) == 4
     assert x_test.index.equals(y_test.index)
     assert set(x_test.columns) == {"x", "z"}
-    assert set(metrics) == {"r2", "mae", "rmse"}
+    assert set(metrics) == {"r2", "adjusted_r2", "mae", "rmse"}
     for metric in metrics.values():
         assert len(metric["fold_scores"]) == 5
+        if any(score is None for score in metric["fold_scores"]):
+            assert metric["mean"] is None
+            assert metric["std"] is None
+            continue
         assert metric["mean"] == pytest.approx(
             np.mean(metric["fold_scores"])
         )
@@ -76,6 +142,9 @@ def test_split_trains_on_eighty_percent_and_returns_twenty_percent_holdout():
             np.std(metric["fold_scores"], ddof=0)
         )
     assert metrics["r2"]["mean"] == pytest.approx(1.0)
+    assert metrics["adjusted_r2"]["mean"] is None
+    assert metrics["adjusted_r2"]["std"] is None
+    assert any(score is None for score in metrics["adjusted_r2"]["fold_scores"])
     assert metrics["mae"]["mean"] == pytest.approx(0.0, abs=1e-10)
     assert metrics["rmse"]["mean"] == pytest.approx(0.0, abs=1e-10)
 
@@ -381,12 +450,18 @@ def test_split_result_serializes_model_cv_and_holdout_metrics_as_strict_json(tmp
     assert removal_test["remaining_features"] == []
     assert removal_test["cross_validation"] == {
         "r2": {"mean": None, "std": None},
+        "adjusted_r2": {"mean": None, "std": None},
         "mae": {"mean": None, "std": None},
         "rmse": {"mean": None, "std": None},
     }
     assert removal_test["limitation"] == "cannot_fit_without_predictor_features"
     assert report["holdout"]["row_count"] == 4
-    assert set(report["holdout"]["metrics"]) == {"r2", "mae", "rmse"}
+    assert set(report["holdout"]["metrics"]) == {
+        "r2",
+        "adjusted_r2",
+        "mae",
+        "rmse",
+    }
     assert len(report["holdout"]["rows"]) == 4
     predictions = result[0].predict(result[1])
     for row, index, actual, prediction in zip(
@@ -418,16 +493,42 @@ def test_feature_removal_tests_evaluate_each_feature_on_identical_folds():
     assert [item["removed_feature"] for item in tests] == ["x", "z"]
     assert tests[0]["remaining_features"] == ["z"]
     assert tests[1]["remaining_features"] == ["x"]
-    assert set(tests[0]["cross_validation"]) == {"r2", "mae", "rmse"}
+    assert set(tests[0]["cross_validation"]) == {
+        "r2",
+        "adjusted_r2",
+        "mae",
+        "rmse",
+    }
 
     for item in tests:
-        for metric in ("r2", "mae", "rmse"):
+        for metric in ("r2", "adjusted_r2", "mae", "rmse"):
+            if (
+                item["cross_validation"][metric]["mean"] is None
+                or current_metrics[metric]["mean"] is None
+            ):
+                assert item["comparison_to_current"][metric + "_change"] is None
+                continue
             assert item["cross_validation"][metric]["mean"] is not None
             assert item["cross_validation"][metric]["std"] >= 0
             assert item["comparison_to_current"][metric + "_change"] == pytest.approx(
                 item["cross_validation"][metric]["mean"]
                 - current_metrics[metric]["mean"]
             )
+
+
+def test_adjusted_r2_is_computed_for_cross_validation_and_holdout():
+    data = _sample_data()
+    result = split_and_train(data, "target", features=["x"])
+
+    cv_adjusted_r2 = result[3]["adjusted_r2"]
+    assert cv_adjusted_r2["mean"] == pytest.approx(1.0)
+    assert cv_adjusted_r2["std"] == pytest.approx(0.0)
+    assert cv_adjusted_r2["fold_scores"] == pytest.approx([1.0] * 5)
+
+    report = json.loads(
+        split_result_to_json(result, "target", include_holdout_stats=True)
+    )
+    assert report["holdout"]["metrics"]["adjusted_r2"] == pytest.approx(1.0)
 
 
 def test_json_omits_holdout_statistics_by_default_and_includes_training_count():
@@ -460,6 +561,7 @@ def test_json_preserves_typed_index_values_and_computes_single_row_errors():
     )
 
     assert report["holdout"]["metrics"]["r2"] is None
+    assert report["holdout"]["metrics"]["adjusted_r2"] is None
     assert report["holdout"]["metrics"]["mae"] == pytest.approx(3.0)
     assert report["holdout"]["metrics"]["rmse"] == pytest.approx(3.0)
     assert report["holdout"]["rows"][0]["index"] == {"type": "int", "value": 7}
@@ -486,6 +588,7 @@ def test_json_reports_null_metrics_for_empty_holdout():
 
     assert report["holdout"]["metrics"] == {
         "r2": None,
+        "adjusted_r2": None,
         "mae": None,
         "rmse": None,
     }
@@ -512,6 +615,7 @@ def test_json_reports_undefined_r2_and_defined_errors_for_constant_holdout_targe
     )
 
     assert report["holdout"]["metrics"]["r2"] is None
+    assert report["holdout"]["metrics"]["adjusted_r2"] is None
     assert report["holdout"]["metrics"]["mae"] == pytest.approx(3.0)
     assert report["holdout"]["metrics"]["rmse"] == pytest.approx(np.sqrt(10))
 
