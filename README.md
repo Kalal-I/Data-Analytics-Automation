@@ -73,10 +73,12 @@ When prompted:
 2. Enter the name of the target column.
 
 The program generates a data-quality report, requests preprocessing decisions,
-filters the decisions through the validator, and applies valid operations.
-Encoding is applied at most once per original/encoded column across the
-iterations. The resulting DataFrame is printed to the console; the program does
-not currently save it to a new CSV file.
+filters the decisions through the validator, and applies valid non-encoding
+operations. It computes dataset and model statistics while categorical
+features still contain their original categories. Recommended encodings are
+applied only after a regularized linear-regression configuration is selected
+and before model training. The resulting DataFrame is printed to the console;
+the program does not currently save it to a new CSV file.
 
 Use a single CSV file for the preprocessing run. The CSV loader can read
 directories, but the main preprocessing loop expects one DataFrame and is not
