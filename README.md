@@ -82,13 +82,15 @@ Use a single CSV file for the preprocessing run. The CSV loader can read
 directories, but the main preprocessing loop expects one DataFrame and is not
 set up to process a list of multiple CSV DataFrames as one run.
 
-## Linear-regression feature-removal evaluation
+## Regularized regression model selection and feature-removal evaluation
 
 `linear_regression.create_folds_and_train()` uses a persisted 80/20 split and
-five-fold cross-validation assignment to train the selected feature set. Its
-serialized report includes `feature_removal_tests`, which fits an additional
+five-fold cross-validation assignment to train a selected Lasso, Ridge, or
+Elastic Net configuration. Its serialized report includes the model type and
+hyperparameters, plus `feature_removal_tests`, which fits an additional
 five-fold evaluation for each selected feature set with that one feature
-removed. Every reduced model uses the same training folds as the full model.
+removed. Every reduced model uses the same folds and model configuration as
+the full model.
 
 Each result reports cross-validation mean and population standard deviation
 for R², adjusted R², MAE, and RMSE. Adjusted R² is `null` if the fold has no
@@ -102,13 +104,14 @@ scored normally; a non-null value explains why it could not be evaluated.
 `feature_removal_tests` is the final top-level JSON section, after the split,
 training, and optional holdout statistics.
 
-At the end of optimization, the selected report must be a fitted feature set
-within `0.005` mean cross-validation R² of the best evaluated set. Among those
+The optimizer evaluates model configurations using the same feature set and
+fold assignments. At the end, it selects a report within `0.005` mean
+cross-validation R² of the best evaluated configuration. Among those
 candidates, selection prioritizes higher adjusted R² when it is available for
 all candidates, then lower RMSE, lower MAE, and fewer features. If adjusted R²
 is unavailable for any eligible candidate, selection falls back to the other
-available metrics. The selected report's metric means and standard deviations
-are printed for context.
+available metrics. The selected model and its recorded alpha (and Elastic Net
+l1_ratio) are printed with its metric means and standard deviations.
 
 ## Supported preprocessing operations
 
