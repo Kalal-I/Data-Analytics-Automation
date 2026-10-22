@@ -1,21 +1,78 @@
 """Tests for the linear regression training and 80/20 split helpers."""
 
 import json
+import inspect
 
 import numpy as np
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import ElasticNet, Lasso, Ridge
 
 from linear_regression.fold_manager import (
-    create_folds_and_train,
+    create_folds_and_train as _create_folds_and_train,
     create_or_load_folds,
 )
 from linear_regression.linear_model import train_linear_regression
-from linear_regression.model_selection import select_best_feature_report
+from linear_regression.model_selection import (
+    format_best_model_configuration,
+    format_model_feature_weights,
+    select_best_feature_report,
+)
 from linear_regression.results_json import split_result_to_json
-from linear_regression.split_data import _cross_validation_metrics, split_and_train
+from linear_regression.split_data import (
+    _cross_validation_metrics,
+    split_and_train as _split_and_train,
+)
+
+
+def split_and_train(
+    data,
+    target_column,
+    model_type="ridge",
+    alpha=1e-12,
+    l1_ratio=None,
+    **kwargs,
+):
+    return _split_and_train(
+        data,
+        target_column,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+        **kwargs,
+    )
+
+
+def create_folds_and_train(
+    data,
+    target_column,
+    model_type="ridge",
+    alpha=1e-12,
+    l1_ratio=None,
+    **kwargs,
+):
+    return _create_folds_and_train(
+        data,
+        target_column,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+        **kwargs,
+    )
+
+
+def _fit_features(data, target_column, features=None, model_type="ridge", alpha=1e-12):
+    fit_data = data
+    if features is not None:
+        feature_names = [features] if isinstance(features, str) else list(features)
+        fit_data = data[feature_names + [target_column]]
+    return train_linear_regression(
+        fit_data,
+        target_column,
+        model_type=model_type,
+        alpha=alpha,
+    )
 
 
 def _sample_data():
@@ -75,6 +132,46 @@ def test_feature_selection_uses_error_and_complexity_when_adjusted_r2_unavailabl
     ]
 
 
+@pytest.mark.parametrize(
+    ("model_type", "model_name", "hyperparameters", "expected"),
+    [
+        ("lasso", "Lasso", {"alpha": 0.1}, "Best Model: Lasso\nAlpha: 0.1"),
+        ("ridge", "Ridge", {"alpha": 1.0}, "Best Model: Ridge\nAlpha: 1.0"),
+        (
+            "elastic_net",
+            "Elastic Net",
+            {"alpha": 0.1, "l1_ratio": 0.5},
+            "Best Model: Elastic Net\nAlpha: 0.1\nL1 Ratio: 0.5",
+        ),
+    ],
+)
+def test_best_model_configuration_output(
+    model_type, model_name, hyperparameters, expected
+):
+    report = {
+        "training": {
+            "model_type": model_type,
+            "model": model_name,
+            "hyperparameters": hyperparameters,
+        }
+    }
+    assert format_best_model_configuration(report) == expected
+
+
+def test_best_model_feature_weights_include_names_and_fitted_values():
+    report = {
+        "training": {
+            "coefficients": {
+                "square_feet": 0.75,
+                "bedrooms": -1.25,
+            }
+        }
+    }
+    assert format_model_feature_weights(report) == (
+        "square_feet: 0.75\nbedrooms: -1.25"
+    )
+
+
 def test_feature_selection_excludes_unfittable_and_undefined_r2_reports():
     no_features = _feature_report([], 1.0, 1.0, 0.0, 0.0)
     undefined_r2 = _feature_report(["a"], None, None, 0.0, 0.0)
@@ -86,34 +183,111 @@ def test_feature_selection_excludes_unfittable_and_undefined_r2_reports():
 
 
 def test_training_defaults_to_all_predictors_and_returns_fitted_model():
-    """Omitting a feature list fits a multiple regression on every predictor."""
-    model = train_linear_regression(_sample_data(), "target")
+    """Training uses every column other than the target as a predictor."""
+    model = train_linear_regression(
+        _sample_data(), "target", model_type="ridge", alpha=1e-12
+    )
 
-    assert isinstance(model, LinearRegression)
+    assert isinstance(model, Ridge)
     assert model.n_features_in_ == 2
     assert list(model.feature_names_in_) == ["x", "z"]
     assert model.predict(pd.DataFrame({"x": [2.0], "z": [1.0]}))[0] == pytest.approx(9)
 
 
-def test_training_accepts_a_selected_feature_subset():
-    """The requested columns alone are used to fit the model."""
-    model = train_linear_regression(_sample_data(), "target", features=["x"])
-
-    assert list(model.feature_names_in_) == ["x"]
+def test_training_function_has_no_features_parameter():
+    assert "features" not in inspect.signature(train_linear_regression).parameters
 
 
 @pytest.mark.parametrize(
-    ("features", "expected"),
+    ("model_type", "alpha", "l1_ratio", "expected_type"),
     [
-        ("z", ["z"]),
-        (["z", "x"], ["z", "x"]),
-        (("z", "x"), ["z", "x"]),
+        ("lasso", 0.1, None, Lasso),
+        ("ridge", 0.1, None, Ridge),
+        ("elastic_net", 0.1, 0.5, ElasticNet),
     ],
 )
-def test_training_preserves_string_list_and_tuple_feature_order(features, expected):
-    model = train_linear_regression(_sample_data(), "target", features=features)
+def test_training_fits_supported_regularized_models(
+    model_type, alpha, l1_ratio, expected_type
+):
+    model = train_linear_regression(
+        _sample_data(),
+        "target",
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+    )
+    assert isinstance(model, expected_type)
+    assert model.training_row_count_ == 20
 
-    assert list(model.feature_names_in_) == expected
+
+@pytest.mark.parametrize("model_type", ["lasso", "ridge"])
+def test_lasso_and_ridge_do_not_receive_l1_ratio(model_type):
+    model = train_linear_regression(
+        _sample_data(),
+        "target",
+        model_type=model_type,
+        alpha=0.1,
+        l1_ratio=0.5,
+    )
+    assert "l1_ratio" not in model.get_params()
+
+
+def test_training_rejects_unsupported_model_and_invalid_regularization():
+    data = _sample_data()
+    with pytest.raises(ValueError, match="model_type must be"):
+        train_linear_regression(data, "target", model_type="ordinary", alpha=1.0)
+    for alpha in (0, -1):
+        with pytest.raises(ValueError, match="alpha must be"):
+            train_linear_regression(data, "target", model_type="ridge", alpha=alpha)
+    with pytest.raises(ValueError, match="required for Elastic Net"):
+        train_linear_regression(data, "target", model_type="elastic_net", alpha=1.0)
+    for l1_ratio in (0, -0.1, 1.1):
+        with pytest.raises(ValueError, match="l1_ratio"):
+            train_linear_regression(
+                data,
+                "target",
+                model_type="elastic_net",
+                alpha=1.0,
+                l1_ratio=l1_ratio,
+            )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "alpha", "l1_ratio", "expected_type", "expected_report"),
+    [
+        ("lasso", 0.1, None, Lasso, {"alpha": 0.1}),
+        ("ridge", 0.25, None, Ridge, {"alpha": 0.25}),
+        (
+            "elastic_net",
+            0.25,
+            0.4,
+            ElasticNet,
+            {"alpha": 0.25, "l1_ratio": 0.4},
+        ),
+    ],
+)
+def test_split_forwards_model_configuration_to_fitted_model(
+    model_type, alpha, l1_ratio, expected_type, expected_report
+):
+    result = split_and_train(
+        _sample_data(),
+        "target",
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+    )
+    model = result[0]
+    assert isinstance(model, expected_type)
+    assert model.alpha == pytest.approx(alpha)
+    if model_type == "elastic_net":
+        assert model.l1_ratio == pytest.approx(l1_ratio)
+
+    report = json.loads(split_result_to_json(result, "target"))
+    assert report["training"]["hyperparameters"] == expected_report
+    assert all(
+        test["hyperparameters"] == expected_report
+        for test in report["feature_removal_tests"]
+    )
 
 
 def test_split_trains_on_eighty_percent_and_returns_twenty_percent_holdout():
@@ -122,7 +296,7 @@ def test_split_trains_on_eighty_percent_and_returns_twenty_percent_holdout():
         _sample_data(), "target"
     )
 
-    assert isinstance(model, LinearRegression)
+    assert isinstance(model, Ridge)
     assert model.n_features_in_ == 2
     assert len(x_test) == 4
     assert len(y_test) == 4
@@ -165,80 +339,69 @@ def test_training_does_not_modify_input_dataframe():
     data.index = range(100, 120)
     original = data.copy(deep=True)
 
-    train_linear_regression(data, "target")
+    train_linear_regression(data, "target", model_type="ridge", alpha=1e-12)
 
     assert_frame_equal(data, original)
 
 
 @pytest.mark.parametrize(
-    ("data", "target", "features", "error", "message"),
+    ("data", "target", "error", "message"),
     [
-        ({"x": [1], "target": [2]}, "target", None, TypeError, "pandas DataFrame"),
-        (pd.DataFrame({"x": [1]}), "target", None, ValueError, "not found"),
-        (pd.DataFrame({"x": [1], "target": [2]}), "target", ["missing"], ValueError, "not found"),
-        (pd.DataFrame({"x": ["red", "blue"], "target": [1, 2]}), "target", None, ValueError, "numeric values"),
-        (pd.DataFrame({"x": [1, np.nan], "target": [2, 3]}), "target", None, ValueError, "missing or non-finite"),
-    ],
-)
-def test_training_rejects_invalid_inputs(data, target, features, error, message):
-    """Invalid input shapes, columns, categories, and missing values fail clearly."""
-    with pytest.raises(error, match=message):
-        train_linear_regression(data, target, features)
-
-
-def test_training_rejects_target_as_predictor():
-    """The target cannot be leaked into the predictor set."""
-    with pytest.raises(ValueError, match="cannot also be used"):
-        train_linear_regression(_sample_data(), "target", features=["target"])
-
-
-@pytest.mark.parametrize(
-    ("data", "features", "error", "message"),
-    [
+        ({"x": [1], "target": [2]}, "target", TypeError, "pandas DataFrame"),
+        (pd.DataFrame({"x": [1]}), "target", ValueError, "not found"),
         (
-            pd.DataFrame({"x": [1, 2], "target": [2, 3]}),
-            [],
+            pd.DataFrame({"x": ["red", "blue"], "target": [1, 2]}),
+            "target",
             ValueError,
-            "cannot be empty",
+            "numeric values",
         ),
         (
-            pd.DataFrame({"x": [1, 2], "target": [2, 3]}),
-            ["x", "x"],
-            ValueError,
-            "duplicate",
-        ),
-        (
-            pd.DataFrame({"x": [1, 2], "target": [2, 3]}),
-            [1],
-            TypeError,
-            "string",
-        ),
-        (
-            pd.DataFrame({"x": [1 + 2j, 2 + 3j], "target": [2, 3]}),
-            None,
-            ValueError,
-            "complex",
-        ),
-        (
-            pd.DataFrame({"x": [1, np.inf], "target": [2, 3]}),
-            None,
+            pd.DataFrame({"x": [1, np.nan], "target": [2, 3]}),
+            "target",
             ValueError,
             "missing or non-finite",
         ),
     ],
 )
-def test_training_rejects_invalid_feature_selection_and_values(
-    data, features, error, message
-):
+def test_training_rejects_invalid_inputs(data, target, error, message):
+    """Invalid input shapes, columns, categories, and missing values fail clearly."""
     with pytest.raises(error, match=message):
-        train_linear_regression(data, "target", features)
+        train_linear_regression(data, target, model_type="ridge", alpha=1e-12)
+
+
+def test_training_rejects_target_as_predictor():
+    """The target is excluded from the predictor columns."""
+    model = train_linear_regression(
+        _sample_data(), "target", model_type="ridge", alpha=1e-12
+    )
+    assert "target" not in model.feature_names_in_
+
+
+@pytest.mark.parametrize(
+    ("data", "error", "message"),
+    [
+        (
+            pd.DataFrame({"x": [1 + 2j, 2 + 3j], "target": [2, 3]}),
+            ValueError,
+            "complex",
+        ),
+        (
+            pd.DataFrame({"x": [1, np.inf], "target": [2, 3]}),
+            ValueError,
+            "missing or non-finite",
+        ),
+    ],
+)
+def test_training_rejects_invalid_numeric_values(data, error, message):
+    with pytest.raises(error, match=message):
+        train_linear_regression(data, "target", model_type="ridge", alpha=1e-12)
 
 
 def test_training_rejects_duplicate_dataframe_columns():
     data = pd.DataFrame([[1, 2, 3]], columns=["x", "x", "target"])
 
     with pytest.raises(ValueError, match="column names must be unique"):
-        train_linear_regression(data, "target")
+        train_linear_regression(data, "target", model_type="ridge", alpha=1e-12)
 
 
 def test_split_rejects_single_row_data():
@@ -273,7 +436,16 @@ def test_cross_validation_rejects_a_constant_target_validation_fold():
     ]
 
     with pytest.raises(ValueError, match="undefined R\\^2.*constant target"):
-        _cross_validation_metrics(data, "target", None, 42, cv_folds=folds)
+        _cross_validation_metrics(
+            data,
+            "target",
+            None,
+            "ridge",
+            1e-12,
+            None,
+            42,
+            cv_folds=folds,
+        )
 
 
 def test_cross_validation_scores_are_deterministic():
@@ -308,15 +480,17 @@ def test_cv_and_final_fit_never_use_holdout_rows(monkeypatch):
             np.arange(len(data)), test_size=0.2, random_state=42
         )[1]
     ].index
-    original_fit = LinearRegression.fit
+    original_fit = Ridge.fit
     fitted_row_indexes = []
 
     def recording_fit(model, predictors, target, *args, **kwargs):
         fitted_row_indexes.append(set(predictors.index))
         return original_fit(model, predictors, target, *args, **kwargs)
 
-    monkeypatch.setattr(LinearRegression, "fit", recording_fit)
-    split_data.split_and_train(data, "target")
+    monkeypatch.setattr(Ridge, "fit", recording_fit)
+    split_data.split_and_train(
+        data, "target", model_type="ridge", alpha=1e-12
+    )
 
     assert len(fitted_row_indexes) == 6 + (5 * 2)
     assert all(not set(expected_test_index).intersection(rows) for rows in fitted_row_indexes)
@@ -442,7 +616,9 @@ def test_split_result_serializes_model_cv_and_holdout_metrics_as_strict_json(tmp
     assert report["data_split"]["training_row_count"] == 16
     assert report["data_split"]["holdout_row_positions"] == folds["test_indices"]
     assert len(report["data_split"]["cross_validation_folds"]) == 5
-    assert report["training"]["model"] == "LinearRegression"
+    assert report["training"]["model"] == "Ridge"
+    assert report["training"]["model_type"] == "ridge"
+    assert report["training"]["hyperparameters"] == {"alpha": 1e-12}
     assert len(report["training"]["cross_validation"]["r2"]["fold_scores"]) == 5
     assert len(report["feature_removal_tests"]) == 1
     removal_test = report["feature_removal_tests"][0]
@@ -493,6 +669,8 @@ def test_feature_removal_tests_evaluate_each_feature_on_identical_folds():
     assert [item["removed_feature"] for item in tests] == ["x", "z"]
     assert tests[0]["remaining_features"] == ["z"]
     assert tests[1]["remaining_features"] == ["x"]
+    assert all(test["model"] == "ridge" for test in tests)
+    assert all(test["hyperparameters"] == {"alpha": 1e-12} for test in tests)
     assert set(tests[0]["cross_validation"]) == {
         "r2",
         "adjusted_r2",
@@ -543,7 +721,7 @@ def test_json_omits_holdout_statistics_by_default_and_includes_training_count():
 
 def test_json_preserves_typed_index_values_and_computes_single_row_errors():
     data = _sample_data()
-    model = train_linear_regression(data, "target", features="x")
+    model = _fit_features(data, "target", features="x")
     x_test = pd.DataFrame({"x": [2.0]}, index=pd.Index([7], dtype="int64"))
     y_test = pd.Series([12.0], index=x_test.index, name="target")
     cv_metrics = {
@@ -569,7 +747,7 @@ def test_json_preserves_typed_index_values_and_computes_single_row_errors():
 
 def test_json_reports_null_metrics_for_empty_holdout():
     data = _sample_data()
-    model = train_linear_regression(data, "target", features="x")
+    model = _fit_features(data, "target", features="x")
     x_test = pd.DataFrame({"x": pd.Series(dtype=float)})
     y_test = pd.Series(dtype=float, name="target")
     cv_metrics = {
@@ -597,7 +775,7 @@ def test_json_reports_null_metrics_for_empty_holdout():
 
 def test_json_reports_undefined_r2_and_defined_errors_for_constant_holdout_target():
     data = _sample_data()
-    model = train_linear_regression(data, "target", features="x")
+    model = _fit_features(data, "target", features="x")
     x_test = pd.DataFrame({"x": [2.0, 3.0]}, index=[4, 5])
     y_test = pd.Series([7.0, 7.0], index=x_test.index, name="target")
     cv_metrics = {
@@ -622,7 +800,7 @@ def test_json_reports_undefined_r2_and_defined_errors_for_constant_holdout_targe
 
 def test_json_preserves_multiindex_type_information_and_rejects_unsupported_index():
     data = _sample_data()
-    model = train_linear_regression(data, "target", features="x")
+    model = _fit_features(data, "target", features="x")
     x_test = pd.DataFrame(
         {"x": [2.0, 3.0]},
         index=pd.MultiIndex.from_tuples([(1, "1"), ("1", 1)]),

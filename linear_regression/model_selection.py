@@ -4,6 +4,40 @@ import math
 from typing import Any
 
 
+def format_best_model_configuration(report: dict[str, Any]) -> str:
+    """Format the selected model and its recorded hyperparameters for output."""
+    training = report["training"]
+    model_names = {
+        "lasso": "Lasso",
+        "ridge": "Ridge",
+        "elastic_net": "Elastic Net",
+    }
+    model_type = training["model_type"]
+    if model_type not in model_names:
+        raise ValueError("Report contains an unsupported model_type.")
+    if training["model"] != model_names[model_type]:
+        raise ValueError("Report model name does not match its model_type.")
+    hyperparameters = training["hyperparameters"]
+    lines = [
+        "Best Model: {}".format(training["model"]),
+        "Alpha: {}".format(hyperparameters["alpha"]),
+    ]
+    if model_type == "elastic_net":
+        lines.append("L1 Ratio: {}".format(hyperparameters["l1_ratio"]))
+    return "\n".join(lines)
+
+
+def format_model_feature_weights(report: dict[str, Any]) -> str:
+    """Format the selected fitted model's coefficients with feature names."""
+    coefficients = report["training"]["coefficients"]
+    if not isinstance(coefficients, dict):
+        raise ValueError("Report feature coefficients must be an object.")
+    return "\n".join(
+        "{}: {}".format(feature, weight)
+        for feature, weight in coefficients.items()
+    )
+
+
 def select_best_feature_report(
     reports: list[dict[str, Any]],
     r2_tolerance: float = 0.005,

@@ -7,12 +7,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
 
 from linear_regression.linear_model import (
+    RegularizedRegressor,
     _as_finite_numeric,
+    _create_regressor,
     _selected_features,
     train_linear_regression,
 )
@@ -69,6 +70,9 @@ def _cross_validation_metrics(
     training_data: pd.DataFrame,
     target_column: str,
     features: Sequence[str] | str | None,
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None,
     random_state: int,
     cv_folds: list[dict[str, list[int]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -109,7 +113,7 @@ def _cross_validation_metrics(
                 "Five-fold cross-validation produced an undefined R^2 score; "
                 "a validation fold has a constant target."
             )
-        model = LinearRegression()
+        model = _create_regressor(model_type, alpha, l1_ratio)
         model.fit(predictors.iloc[train_indices], target.iloc[train_indices])
         predictions = model.predict(predictors.iloc[validation_indices])
         r2 = float(r2_score(actual, predictions))
@@ -150,6 +154,9 @@ def _feature_removal_metrics(
     training_data: pd.DataFrame,
     target_column: str,
     features: list[str],
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None,
     random_state: int,
     cv_folds: list[dict[str, list[int]]],
     current_metrics: dict[str, dict[str, Any]],
@@ -165,6 +172,9 @@ def _feature_removal_metrics(
                 training_data,
                 target_column=target_column,
                 features=remaining_features,
+                model_type=model_type,
+                alpha=alpha,
+                l1_ratio=l1_ratio,
                 random_state=random_state,
                 cv_folds=cv_folds,
             )
@@ -203,6 +213,15 @@ def _feature_removal_metrics(
             {
                 "removed_feature": removed_feature,
                 "remaining_features": remaining_features,
+                "model": model_type,
+                "hyperparameters": {
+                    "alpha": float(alpha),
+                    **(
+                        {"l1_ratio": float(l1_ratio)}
+                        if model_type == "elastic_net" and l1_ratio is not None
+                        else {}
+                    ),
+                },
                 "cross_validation": cv_summary,
                 "comparison_to_current": comparisons,
                 "limitation": limitation,
@@ -304,10 +323,18 @@ def _validate_saved_folds(
 def split_and_train(
     data: pd.DataFrame,
     target_column: str,
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None = None,
     features: Sequence[str] | str | None = None,
     random_state: int = 42,
     folds: dict[str, Any] | None = None,
-) -> tuple[LinearRegression, pd.DataFrame, pd.Series, dict[str, dict[str, Any]]]:
+) -> tuple[
+    RegularizedRegressor,
+    pd.DataFrame,
+    pd.Series,
+    dict[str, dict[str, Any]],
+]:
     """Train on an 80% split, optionally using previously saved row folds.
 
     Five-fold cross-validation and its metrics are calculated using only the
@@ -316,6 +343,8 @@ def split_and_train(
 
     ``folds`` may be supplied by ``create_folds_and_train`` to guarantee the
     same outer split and CV fold membership across feature-selection runs.
+    The requested predictor subset is selected here; the fitted training
+    function always uses all columns in the training frame.
     Returns ``(model, X_test, y_test, cross_validation_metrics)``.
     """
     if not isinstance(data, pd.DataFrame):
@@ -336,7 +365,10 @@ def split_and_train(
     if isinstance(random_state, bool) or not isinstance(random_state, int):
         raise TypeError("random_state must be an integer.")
 
+    model = _create_regressor(model_type, alpha, l1_ratio)
     selected_features = _selected_features(data, target_column, features)
+    train_data = data
+    test_data = data
 
     if folds is None:
         train_data, test_data = train_test_split(
@@ -362,6 +394,9 @@ def split_and_train(
         train_data,
         target_column=target_column,
         features=features,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
         random_state=random_state,
         cv_folds=cv_folds,
     )
@@ -369,14 +404,20 @@ def split_and_train(
         train_data,
         target_column=target_column,
         features=selected_features,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
         random_state=random_state,
         cv_folds=cv_folds,
         current_metrics=metrics,
     )
+    fit_data = train_data[selected_features + [target_column]]
     model = train_linear_regression(
-        train_data,
+        fit_data,
         target_column=target_column,
-        features=features,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
     )
     model.feature_removal_tests_ = feature_removal_tests
     return (
