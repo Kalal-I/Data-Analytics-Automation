@@ -30,6 +30,10 @@ from preproccessing.min_max_scaler import min_max_scale
 from preproccessing.ordinal_encoding import ordinal_encode
 from preproccessing.outlier_detection import detect_outliers
 from preproccessing.validation import validate_preprocessing_calls
+from preproccessing.deferred_encoding import (
+    apply_deferred_encodings,
+    partition_deferred_encodings,
+)
 
 PREPROCESSING_FUNCTIONS = {
     "fill_missing_values": fill_missing_values,
@@ -65,8 +69,7 @@ if isinstance(df, list):
     raise ValueError("The main pipeline requires a single CSV DataFrame.")
 target = input("Enter the target column name: ")
 report = ""
-encoded_columns = set()
-one_hot_encoded_features = set()
+deferred_encoding_operations = {}
 '''if (isinstance(df,list)):
     print(df.size())
 else:
@@ -79,44 +82,30 @@ while True:
     print(operation_to_do)
 
     operation_to_do = validate_preprocessing_calls(operation_to_do, report)
-    operation_to_do = {
-        column: operations
-        for column, operations in operation_to_do.items()
-        if column not in encoded_columns
-    }
+    operation_to_do, deferred_operations = partition_deferred_encodings(
+        operation_to_do
+    )
+    for column, operations in deferred_operations.items():
+        deferred_encoding_operations.setdefault(column, operations)
     print("After validation:")
     print(operation_to_do)
     print("The following operations will be performed on the DataFrame:")
-    if(operation_to_do=={}):
+    if operation_to_do == {}:
         print(operation_to_do)
         break
     for column, operations in operation_to_do.items():
         for operation in operations:
             function = PREPROCESSING_FUNCTIONS[operation["function"]]
-            columns_before = set(df.columns)
             df = function(df, **operation["inputs"])
-            if operation["function"] == "one_hot_encode":
-                one_hot_encoded_features.update(set(df.columns) - columns_before)
-            if operation["function"] in {
-                "one_hot_encode",
-                "label_encode",
-                "ordinal_encode",
-            }:
-                encoded_columns.update(set(df.columns) - columns_before)
-                if column in df.columns:
-                    encoded_columns.add(column)
 print("Preprocessing completed. The processed DataFrame is:")
 print(df)
-print(encoded_columns)
+print(
+    "Categorical encodings deferred until after model selection:",
+    sorted(deferred_encoding_operations),
+)
 
 dataset_description = json.loads(generate_report(df, path, target))
-statistics = json.loads(
-    generate_model_statistics(
-        df,
-        target,
-        one_hot_encoded_features=sorted(one_hot_encoded_features),
-    )
-)
+statistics = json.loads(generate_model_statistics(df, target))
 label_type = dataset_description["Reports"][0]["Target column"]["Type"]
 
 regression_recommendation = linear_regression_agent(
@@ -131,11 +120,6 @@ print(regression_recommendation)
 
 ranked_models = regression_recommendation["ranked_models"]
 if ranked_models:
-    folds_file = (
-        Path(__file__).resolve().parent
-        / "linear_regression"
-        / "folds_{}.json".format(_data_fingerprint(df))
-    )
     model_reports = []
     current_model_report = {
         "target_column": target,
@@ -144,6 +128,7 @@ if ranked_models:
         "initial_model_ranking": regression_recommendation,
     }
     model_experiences = []
+    encodings_applied = False
 
     for optimization_iteration in range(5):
         model_recommendation = feature_optimization_linear_model_agent(
@@ -164,6 +149,18 @@ if ranked_models:
             "Ridge": "ridge",
             "ElasticNet": "elastic_net",
         }[model_recommendation["model"]]
+        if not encodings_applied:
+            df = apply_deferred_encodings(
+                df,
+                deferred_encoding_operations,
+                PREPROCESSING_FUNCTIONS,
+            )
+            encodings_applied = True
+        folds_file = (
+            Path(__file__).resolve().parent
+            / "linear_regression"
+            / "folds_{}.json".format(_data_fingerprint(df))
+        )
         hyperparameters = model_recommendation["hyperparameters"]
         alpha = float(hyperparameters["alpha"])
         if model_type == "elastic_net":
