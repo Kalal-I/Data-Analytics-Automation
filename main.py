@@ -95,6 +95,8 @@ while True:
         break
     for column, operations in operation_to_do.items():
         for operation in operations:
+            if operation["function"] == "standard_scale":
+                continue
             function = PREPROCESSING_FUNCTIONS[operation["function"]]
             df = function(df, **operation["inputs"])
 print("Preprocessing completed. The processed DataFrame is:")
@@ -154,6 +156,10 @@ if ranked_models:
                 df,
                 deferred_encoding_operations,
                 PREPROCESSING_FUNCTIONS,
+            )
+            print(
+                "Standard scaling will be fit on each training partition "
+                "and then applied to its validation or holdout data."
             )
             encodings_applied = True
         folds_file = (
