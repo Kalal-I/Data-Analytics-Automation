@@ -1029,3 +1029,116 @@ def test_correlation_threshold_rejects_non_real_types(threshold):
             "target",
             correlation_threshold=threshold,
         )
+
+
+def test_categorical_counts_percentages_target_moments_and_eta():
+    """Categorical summaries use non-missing values and the population variance."""
+    report = _report(
+        pd.DataFrame(
+            {
+                "category": ["a", "a", "b", "b", "b", None],
+                "target": [1.0, 2.0, 3.0, 4.0, 5.0, 100.0],
+            }
+        )
+    )
+
+    feature = report["categorical_feature_statistics"]["features"][0]
+    assert feature["unique_category_count"] == 2
+    assert feature["category_frequencies"] == {"a": 2, "b": 3}
+    assert feature["category_frequencies_percentage"] == {
+        "a": pytest.approx(40.0),
+        "b": pytest.approx(60.0),
+    }
+    assert feature["rare_category_count"] == 2
+    assert feature["missing_count"] == 1
+    assert feature["missing_percentage"] == pytest.approx(100 / 6)
+
+    relationship = report["categorical_target_relationships"][0]
+    assert relationship["target_mean_by_category"] == {"a": 1.5, "b": 4.0}
+    assert relationship["target_variance_by_category"] == {
+        "a": pytest.approx(0.25),
+        "b": pytest.approx(2 / 3),
+    }
+    assert relationship["valid_paired_observation_count"] == 5
+    assert relationship["categorical_target_association"] == pytest.approx(
+        math.sqrt(0.75)
+    )
+
+
+def test_categorical_statistics_cover_binary_rare_threshold_and_singletons():
+    """Binary categories and configurable rare thresholds are reported explicitly."""
+    report = _report(
+        pd.DataFrame(
+            {
+                "flag": ["yes", "no", "yes", "no", "other"],
+                "target": [1, 2, 3, 4, 5],
+            }
+        ),
+        rare_category_threshold=2,
+    )
+
+    feature = report["categorical_feature_statistics"]["features"][0]
+    assert feature["category_frequencies"] == {"yes": 2, "no": 2, "other": 1}
+    assert feature["rare_category_count"] == 1
+    assert report["categorical_feature_statistics"][
+        "rare_category_frequency_threshold"
+    ] == 2
+    assert report["categorical_target_relationships"][0][
+        "target_variance_by_category"
+    ]["other"] is None
+
+
+def test_categorical_relationships_exclude_missing_targets_and_constant_targets():
+    """Pairwise validity excludes missing targets and eta is null for constants."""
+    report = _report(
+        pd.DataFrame(
+            {"category": ["a", "a", "b", None], "target": [1, None, 1, 1]}
+        )
+    )
+    relationship = report["categorical_target_relationships"][0]
+    assert relationship["valid_paired_observation_count"] == 2
+    assert relationship["target_mean_by_category"] == {"a": 1.0, "b": 1.0}
+    assert relationship["categorical_target_association"] is None
+
+
+def test_empty_and_mixed_type_categorical_columns_are_json_safe():
+    """All-missing and mixed scalar categories remain deterministic and serializable."""
+    report = _report(
+        pd.DataFrame(
+            {
+                "empty": [None, np.nan, None, None],
+                "mixed": ["1", 1, "x", "x"],
+                "target": [1, 2, 3, 4],
+            }
+        )
+    )
+    summaries = {
+        item["feature"]: item
+        for item in report["categorical_feature_statistics"]["features"]
+    }
+    assert summaries["empty"]["unique_category_count"] == 0
+    assert summaries["empty"]["category_frequencies"] == {}
+    assert summaries["empty"]["missing_count"] == 4
+    assert summaries["mixed"]["unique_category_count"] == 3
+    assert summaries["mixed"]["category_frequencies"]["1"] == 1
+    assert any(key.startswith("1 (") for key in summaries["mixed"][
+        "category_frequencies"
+    ])
+    result = generate_model_statistics(
+        pd.DataFrame({"category": ["a", None], "target": [1, 2]}), "target"
+    )
+    json.loads(result, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)))
+
+
+@pytest.mark.parametrize(
+    ("threshold", "exception"),
+    [(0, ValueError), (True, TypeError), ("5", TypeError)],
+)
+def test_rare_category_threshold_is_validated(threshold, exception):
+    """The rare-category threshold accepts only positive integers."""
+    with pytest.raises(exception, match="rare_category_threshold"):
+        generate_model_statistics(
+            pd.DataFrame({"category": ["a"], "target": [1]}),
+            "target",
+            rare_category_threshold=threshold,
+        )
