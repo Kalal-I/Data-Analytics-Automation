@@ -83,6 +83,13 @@ sections:
   in-sample fit and residual summaries. This is diagnostic evidence, not a
   holdout evaluation; standardized residual outliers use an absolute
   three-standard-deviation cutoff.
+- `categorical_feature_statistics`: distinct non-missing category counts,
+  deterministic category frequencies and percentages, rare-category counts,
+  and dataset missingness for each categorical feature. The rare-category
+  frequency threshold defaults to 5 and is configurable.
+- `categorical_target_relationships`: pairwise-valid target means and
+  population variances by category, valid paired counts, and correlation-ratio
+  (eta) associations for categorical features with a numerical target.
 
 Distribution and relationship calculations use the existing safe numeric
 conversion policy and exclude missing, invalid, non-finite, and
@@ -91,6 +98,10 @@ residuals are exploratory in-sample heuristics; they are not significance
 tests and do not estimate out-of-sample performance. Missing values are
 reported, not imputed, and categorical features remain visible in cardinality
 and missingness summaries without being treated as numeric predictors.
+Target dependent categorical statistics are descriptive associations computed from the
+data supplied to the generator; they are not proof of predictive usefulness or
+causation. When the generator is used during model evaluation, supply training
+data for training-time feature selection rather than validation or test data.
 
 Native numeric predictors are treated as numerical. A string/object predictor
 is treated as numerical only when strictly more than half of its non-missing
