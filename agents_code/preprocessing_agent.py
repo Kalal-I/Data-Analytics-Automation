@@ -116,6 +116,15 @@ Expected operations:
     }
   ]
 }
+### Categorical Columns from the Profiler — Mandatory Rule
+
+For every non-target column listed under `Categorical columns`:
+
+- Determine whether it is nominal, ordinal, already appropriately encoded, or an identifier using the available dataset description.
+- Every nominal categorical feature with manageable cardinality MUST receive `one_hot_encode`, unless it is already appropriately encoded or there is clear evidence that it is an identifier.
+- Every ordinal categorical feature MUST use `ordinal_encode` only when its category order is explicitly established.
+- Before returning JSON, verify that every eligible categorical feature has the appropriate encoding operation. Do not rely solely on whether a column appears under `Non-categorical string columns`.
+
 ### MANDATORY STRING-COLUMN ENCODING RULE
 
 For every non-target column reported as having a string, object, or categorical data type:
