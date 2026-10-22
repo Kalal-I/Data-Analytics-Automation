@@ -14,6 +14,7 @@ from linear_regression.split_data import (
     _validate_saved_folds,
     split_and_train,
 )
+from linear_regression.linear_model import RegularizedRegressor
 
 DEFAULT_FOLDS_FILE = Path(__file__).with_name("stored_folds.json")
 
@@ -100,10 +101,18 @@ def create_or_load_folds(
 def create_folds_and_train(
     data: pd.DataFrame,
     target_column: str,
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None = None,
     features: list[str] | tuple[str, ...] | str | None = None,
     random_state: int = 42,
     folds_file: str | Path = DEFAULT_FOLDS_FILE,
-):
+) -> tuple[
+    RegularizedRegressor,
+    pd.DataFrame,
+    pd.Series,
+    dict[str, dict[str, Any]],
+]:
     """Reuse a persisted split/fold assignment to train a selected feature set."""
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame.")
@@ -127,6 +136,9 @@ def create_folds_and_train(
     return split_and_train(
         data,
         target_column=target_column,
+        model_type=model_type,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
         features=features,
         random_state=random_state,
         folds=folds,

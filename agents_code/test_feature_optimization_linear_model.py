@@ -27,8 +27,9 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
         return _FakeResponse(
             {
                 "response": (
-                    '{"schema_version": 1, "action": "remove_features", '
-                    '"features_to_remove": ["x"]}'
+                    '{"schema_version": 1, "action": "evaluate_model", '
+                    '"model": "ElasticNet", "hyperparameters": '
+                    '{"alpha": 0.1, "l1_ratio": 0.5, "max_iter": 10000}}'
                 )
             }
         )
@@ -36,34 +37,73 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
     monkeypatch.setattr(feature_agent.requests, "post", fake_post)
     result = feature_agent.feature_optimization_linear_model_agent(
         {
-            "current_feature_set": {"features": ["x", "y"]},
-            "feature_removal_tests": [],
-            "note": "structured input",
+            "target_column": "target",
+            "training": {
+                "model": "Ridge",
+                "model_type": "ridge",
+                "hyperparameters": {"alpha": 1.0},
+                "cross_validation": {"r2": {"mean": 0.8}},
+            },
         },
         iteration_number=3,
         past_experiences=[
             {
-                "features": ["x"],
-                "training": {"cross_validation": {"r2": {"mean": 0.8}}},
+                "target_column": "target",
+                "training": {
+                    "model": "Ridge",
+                    "model_type": "ridge",
+                    "hyperparameters": {"alpha": 1.0},
+                    "cross_validation": {"r2": {"mean": 0.8}},
+                },
             }
         ],
     )
 
     assert captured["url"] == "https://example.test/generate"
     prompt = captured["json"]["prompt"]
-    assert "Current iteration number: 3" in prompt
-    assert '"current_feature_set": {"features": ["x", "y"]}' in prompt
-    assert '"note": "structured input"' in captured["json"]["prompt"]
-    assert '"features": ["x"]' in prompt
+    assert "Current iteration number: `3`" in prompt
+    assert '"target_column": "target"' in prompt
+    assert '"features"' not in prompt
+    assert '"feature_removal_tests"' not in prompt
+    assert "<MODEL_OPTIMIZATION_REPORT>" not in prompt
     assert "<FEATURE_OPTIMIZATION_REPORT>" not in prompt
     assert "<PAST_EXPERIENCES>" not in prompt
-    assert "start a different experiment" in prompt
     assert captured["headers"]["Authorization"] == "Bearer test-token"
     assert result == {
         "schema_version": 1,
-        "action": "remove_features",
-        "features_to_remove": ["x"],
+        "action": "evaluate_model",
+        "model": "ElasticNet",
+        "hyperparameters": {
+            "alpha": 0.1,
+            "l1_ratio": 0.5,
+            "max_iter": 10000,
+        },
     }
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "Ridge", "hyperparameters": {"alpha": 0}}',
+            "alpha must be a positive finite number",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "ElasticNet", "hyperparameters": {"alpha": 1}}',
+            "requires l1_ratio",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "Lasso", "hyperparameters": {"alpha": 1, "l1_ratio": 0.5}}',
+            "must not include l1_ratio",
+        ),
+    ],
+)
+def test_clean_json_output_rejects_invalid_model_configurations(response, message):
+    with pytest.raises(ValueError, match=message):
+        feature_agent.clean_json_output(response)
 
 
 @pytest.mark.parametrize(
@@ -97,7 +137,7 @@ def test_agent_rejects_non_dictionary_input(monkeypatch, value):
     monkeypatch.setattr(feature_agent, "API_URL", "https://example.test")
     monkeypatch.setattr(feature_agent, "API_TOKEN", "test-token")
 
-    with pytest.raises(TypeError, match="feature_optimization_report"):
+    with pytest.raises(TypeError, match="model_optimization_report"):
         feature_agent.feature_optimization_linear_model_agent(value)
 
 

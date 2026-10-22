@@ -1,16 +1,17 @@
 # Linear Regression Package
 
 This folder provides utilities for fitting and evaluating scikit-learn
-`LinearRegression` models using pandas `DataFrame` inputs. Its public
-functions support model fitting, a reproducible holdout split, five-fold
+Lasso, Ridge, and Elastic Net regression models using pandas `DataFrame`
+inputs. Its public functions support model fitting, a reproducible holdout split, five-fold
 cross-validation, reusable saved split assignments, and JSON serialization of
 the results.
 
 The package does **not** clean data, encode categorical variables, impute
 missing values, scale features, select features, or choose a model
-automatically. Prepare the input DataFrame before calling the training
-functions. The selected predictors and target must be finite real numeric
-values.
+automatically. The split layer can evaluate reduced predictor sets; the
+training function always uses all columns other than the target. Prepare the
+input DataFrame before calling the training functions. Predictors and target
+must be finite real numeric values.
 
 ## Files
 
@@ -60,23 +61,30 @@ persistence/reuse, JSON output, index handling, and holdout-report options.
 train_linear_regression(
     training_data: pd.DataFrame,
     target_column: str,
-    features: Sequence[str] | str | None = None,
-) -> sklearn.linear_model.LinearRegression
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None = None,
+) -> Lasso | Ridge | ElasticNet
 ```
 
 Fits and returns a model using all rows in `training_data`.
 
 - `training_data`: DataFrame containing the target and predictors.
 - `target_column`: name of the numeric target column.
-- `features`: one feature name, or a list/tuple of feature names. If omitted,
-  every column other than the target is used. Explicit feature order is
-  preserved.
-- Returns a fitted `LinearRegression` model. The model's
-  `training_row_count_` attribute is the number of rows used for fitting.
+- `model_type`: one of `"lasso"`, `"ridge"`, or `"elastic_net"`.
+- `alpha`: positive finite regularization strength.
+- `l1_ratio`: required for Elastic Net and must satisfy `0 < l1_ratio <= 1`.
+  It is ignored for Lasso and Ridge.
+- Every column other than the target is used as a predictor. For reduced
+  feature sets, pass a subset DataFrame to the function or use
+  `split_and_train(features=...)`.
+- Returns the fitted estimator. Its `training_row_count_`, `model_type_`,
+  `regularization_alpha_`, and `regularization_l1_ratio_` attributes record
+  the training configuration and sample count.
 
 Raises a clear `TypeError` or `ValueError` for invalid inputs, including a
-non-DataFrame or empty input, missing target/features, duplicate DataFrame
-column names, invalid feature selection, non-numeric or complex values, and
+non-DataFrame or empty input, missing target, duplicate DataFrame column
+names, invalid model configuration, non-numeric or complex values, and
 missing or non-finite numbers. The function does not encode categories or
 impute missing values and does not modify the caller's DataFrame.
 
@@ -86,11 +94,14 @@ impute missing values and does not modify the caller's DataFrame.
 split_and_train(
     data: pd.DataFrame,
     target_column: str,
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None = None,
     features: Sequence[str] | str | None = None,
     random_state: int = 42,
     folds: dict[str, Any] | None = None,
 ) -> tuple[
-    LinearRegression,
+    Lasso | Ridge | ElasticNet,
     pd.DataFrame,
     pd.Series,
     dict[str, dict[str, Any]],
@@ -104,8 +115,9 @@ for optional evaluation and is not used in fitting or CV.
 
 - `data`: prepared numeric DataFrame.
 - `target_column`: target column name.
-- `features`: optional predictor selection, following the same rules as
-  `train_linear_regression`.
+- `model_type`, `alpha`, and `l1_ratio`: the selected estimator configuration.
+- `features`: optional predictor selection for the split and feature-ablation
+  experiments. It is applied by the split layer, not the training function.
 - `random_state`: integer seed used for reproducible splitting and CV when
   folds are not supplied.
 - `folds`: optional saved fold assignment, normally returned by
@@ -171,11 +183,14 @@ remove the old file.
 create_folds_and_train(
     data: pd.DataFrame,
     target_column: str,
+    model_type: str,
+    alpha: float,
+    l1_ratio: float | None = None,
     features: list[str] | tuple[str, ...] | str | None = None,
     random_state: int = 42,
     folds_file: str | Path = DEFAULT_FOLDS_FILE,
 ) -> tuple[
-    LinearRegression,
+    Lasso | Ridge | ElasticNet,
     pd.DataFrame,
     pd.Series,
     dict[str, dict[str, Any]],
@@ -183,7 +198,8 @@ create_folds_and_train(
 ```
 
 Validates the selected target/features, obtains the saved assignment from
-`create_or_load_folds()`, then calls the split/training logic with those folds.
+`create_or_load_folds()`, then calls the split/training logic with the
+selected model configuration and those folds.
 Returns the same four-item tuple as `split_and_train()`. Calls using different
 feature selections on the same DataFrame and fold file reuse the same holdout
 and CV membership. The return annotation is the four-item tuple documented
@@ -243,6 +259,8 @@ data = pd.read_csv("prepared_properties.csv")
 result = split_and_train(
     data,
     target_column="Price_USD",
+    model_type="ridge",
+    alpha=1.0,
     features=None,  # Use every column except Price_USD
     random_state=42,
 )
@@ -268,6 +286,9 @@ from linear_regression import create_folds_and_train, split_result_to_json
 result = create_folds_and_train(
     data,
     target_column="Price_USD",
+    model_type="elastic_net",
+    alpha=0.1,
+    l1_ratio=0.5,
     features=["Square_Feet", "Bedrooms", "Bathrooms"],
     random_state=42,
     folds_file="experiments/property_folds.json",

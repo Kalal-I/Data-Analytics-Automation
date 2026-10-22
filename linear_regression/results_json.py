@@ -139,13 +139,35 @@ def split_result_to_json(
             }
         )
 
+    model_type = getattr(model, "model_type_", None)
+    model_names = {
+        "lasso": "Lasso",
+        "ridge": "Ridge",
+        "elastic_net": "Elastic Net",
+    }
+    if model_type not in model_names:
+        raise ValueError("The fitted model is missing supported model metadata.")
+    hyperparameters = {
+        "alpha": _json_float(
+            model.regularization_alpha_,
+            "model regularization alpha",
+        )
+    }
+    if model_type == "elastic_net":
+        hyperparameters["l1_ratio"] = _json_float(
+            model.regularization_l1_ratio_,
+            "model l1_ratio",
+        )
+
     report = {
         "schema_version": 1,
         "target_column": target_column,
         "features": feature_names,
         "data_split": split_details,
         "training": {
-            "model": "LinearRegression",
+            "model": model_names[model_type],
+            "model_type": model_type,
+            "hyperparameters": hyperparameters,
             "intercept": _json_float(model.intercept_, "model intercept"),
             "coefficients": {
                 name: _json_float(coefficient, "coefficient for {!r}".format(name))
