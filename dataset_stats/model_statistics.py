@@ -276,6 +276,147 @@ def _feature_target_relationships(
     return relationships
 
 
+def _is_missing_scalar(value: Any) -> bool:
+    """Return missingness for scalar values without truth-testing arrays."""
+    try:
+        result = pd.isna(value)
+    except Exception:
+        return False
+    return isinstance(result, (bool, np.bool_)) and bool(result)
+
+
+def _category_labels(values: list[Any]) -> list[str]:
+    """Create deterministic JSON labels without merging mixed-type values."""
+    labels: list[str] = []
+    used: set[str] = set()
+    for value in values:
+        base_label = str(value)
+        label = base_label
+        if label in used:
+            label = "{} ({})".format(base_label, type(value).__name__)
+        suffix = 2
+        while label in used:
+            label = "{} ({})".format(base_label, suffix)
+            suffix += 1
+        used.add(label)
+        labels.append(label)
+    return labels
+
+
+def _categorical_statistics(
+    data: pd.DataFrame,
+    target_column: str,
+    target_values: pd.Series,
+    rare_category_threshold: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Summarize categorical values and descriptive target associations."""
+    feature_summaries: list[dict[str, Any]] = []
+    target_relationships: list[dict[str, Any]] = []
+    for column in data.columns:
+        if column == target_column:
+            continue
+        source_values = data[column].reset_index(drop=True)
+        analysis = analyze_column(source_values)
+        if analysis.detected_type not in {"categorical", "all_missing"}:
+            continue
+
+        category_values = [
+            value for value in source_values if not _is_missing_scalar(value)
+        ]
+        representatives: list[Any] = []
+        seen_tokens: set[tuple[type[Any], str]] = set()
+        for value in category_values:
+            token = (type(value), repr(value))
+            if token not in seen_tokens:
+                seen_tokens.add(token)
+                representatives.append(value)
+        labels = _category_labels(representatives)
+        label_by_token = {
+            (type(value), repr(value)): label
+            for value, label in zip(representatives, labels)
+        }
+        frequencies = {label: 0 for label in labels}
+        for value in category_values:
+            frequencies[label_by_token[(type(value), repr(value))]] += 1
+        non_missing_count = len(category_values)
+        feature_summaries.append(
+            {
+                "feature": str(column),
+                "unique_category_count": len(representatives),
+                "category_frequencies": frequencies,
+                "category_frequencies_percentage": {
+                    label: _finite_float(100.0 * count / non_missing_count)
+                    if non_missing_count
+                    else None
+                    for label, count in frequencies.items()
+                },
+                "rare_category_count": sum(
+                    count < rare_category_threshold for count in frequencies.values()
+                ),
+                "missing_count": int(analysis.missing_count),
+                "missing_percentage": _finite_float(
+                    100.0 * analysis.missing_count / len(data)
+                ),
+            }
+        )
+
+        category_labels = [
+            label_by_token.get((type(value), repr(value)))
+            if not _is_missing_scalar(value)
+            else None
+            for value in source_values
+        ]
+        grouped_targets: dict[str, list[float]] = {label: [] for label in labels}
+        for label, target in zip(category_labels, target_values):
+            if label is not None and target is not None and not pd.isna(target):
+                grouped_targets[label].append(float(target))
+        target_means = {
+            label: _finite_float(float(np.mean(values))) if values else None
+            for label, values in grouped_targets.items()
+        }
+        target_variances = {
+            label: _finite_float(float(np.var(values, ddof=0)))
+            if len(values) >= 2
+            else None
+            for label, values in grouped_targets.items()
+        }
+        paired_targets = [target for values in grouped_targets.values() for target in values]
+        if len(paired_targets) >= 2 and np.unique(paired_targets).size > 1:
+            overall_mean = float(np.mean(paired_targets))
+            total_sum_squares = sum(
+                (target - overall_mean) ** 2 for target in paired_targets
+            )
+            between_sum_squares = sum(
+                len(values) * (float(np.mean(values)) - overall_mean) ** 2
+                for values in grouped_targets.values()
+                if values
+            )
+            eta = _finite_float(
+                math.sqrt(between_sum_squares / total_sum_squares)
+                if total_sum_squares > 0
+                else None
+            )
+        else:
+            eta = None
+        target_relationships.append(
+            {
+                "feature": str(column),
+                "target_mean_by_category": target_means,
+                "target_variance_by_category": target_variances,
+                "valid_paired_observation_count": len(paired_targets),
+                "categorical_target_association": eta,
+            }
+        )
+
+    return (
+        {
+            "rare_category_frequency_threshold": rare_category_threshold,
+            "features": feature_summaries,
+        },
+        target_relationships,
+    )
+
+
 def _feature_pair_relationships(
     numeric_predictors: dict[Any, pd.Series],
     threshold: float,
@@ -850,6 +991,7 @@ def generate_model_statistics(
     one_hot_encoded_features: (
         list[str] | tuple[str, ...] | set[str] | frozenset[str] | None
     ) = None,
+    rare_category_threshold: int = 5,
 ) -> str:
     """Return strict JSON with regression statistics and diagnostic screens.
 
@@ -881,6 +1023,9 @@ def generate_model_statistics(
     information, and pairwise correlation calculations. Verified 0/1 features
     are explicitly excluded from quadratic-term comparisons because squaring
     them duplicates their linear values.
+
+    Categorical target associations are descriptive associations computed from
+    the supplied data; they do not prove predictive usefulness or causation.
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame.")
@@ -909,6 +1054,12 @@ def generate_model_statistics(
         ) from error
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("correlation_threshold must be finite and between 0 and 1.")
+    if isinstance(rare_category_threshold, bool) or not isinstance(
+        rare_category_threshold, int
+    ):
+        raise TypeError("rare_category_threshold must be a positive integer.")
+    if rare_category_threshold < 1:
+        raise ValueError("rare_category_threshold must be a positive integer.")
 
     if one_hot_encoded_features is None:
         encoded_features: list[str] = []
@@ -943,6 +1094,12 @@ def generate_model_statistics(
     )
     relationships = _feature_target_relationships(
         numeric_predictors, target_values, feature_reports
+    )
+    categorical_statistics, categorical_relationships = _categorical_statistics(
+        data,
+        target_column,
+        target_values,
+        rare_category_threshold,
     )
     feature_feature_relationships, highly_correlated_pairs = (
         _feature_pair_relationships(numeric_predictors, threshold)
@@ -997,6 +1154,8 @@ def generate_model_statistics(
         "target": target_report,
         "features": features,
         "feature_target_relationships": relationships,
+        "categorical_feature_statistics": categorical_statistics,
+        "categorical_target_relationships": categorical_relationships,
         "feature_feature_relationships": feature_feature_relationships,
         "multicollinearity": {
             "method": "Pearson correlation with pairwise complete finite observations",
@@ -1021,7 +1180,9 @@ def generate_model_statistics(
         "interpretation": (
             "Correlations describe association, not causation, and do not "
             "guarantee predictive usefulness. This evidence neither identifies "
-            "every important feature nor determines the best regression model."
+            "every important feature nor determines the best regression model. "
+            "Categorical target associations are descriptive and are not proof "
+            "of predictive usefulness or causation."
         ),
     }
     return json.dumps(result, indent=2, allow_nan=False)
