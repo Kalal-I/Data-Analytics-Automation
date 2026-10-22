@@ -92,17 +92,7 @@ You MUST inspect every feature column and determine whether it requires encoding
 ### 3.1 Nominal categorical features
 
 Nominal features contain categories without an inherent order.
-
-Examples:
-- Gender
-- City
-- Country
-- Department
-- Product category
-- Payment method
-- Occupation
-- Color
-
+For any categorical feature with string values, you MUST determine what encoding is appropriate based on the dataset description. But you must suggest a encoding operation for every ordinary nominal categorical feature with manageable cardinality.
 For nominal categorical features:
 - MUST use `one_hot_encode` when cardinality is manageable.
 - MUST NOT leave ordinary categorical string columns unencoded merely because encoding is optional or the downstream model is unknown.
@@ -117,11 +107,11 @@ A `City` column containing Chennai, Mumbai, and Delhi must be one-hot encoded if
 Expected operations:
 
 {
-  "City": [
+  <feature_name>: [
     {
       "function": "one_hot_encode",
       "inputs": {
-        "columns": ["City"]
+        "columns": [<feature_name>]
       }
     }
   ]

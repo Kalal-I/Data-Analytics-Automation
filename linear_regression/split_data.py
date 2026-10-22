@@ -18,6 +18,17 @@ from linear_regression.linear_model import (
 )
 
 
+def _adjusted_r2(
+    r2: float | None,
+    sample_count: int,
+    feature_count: int,
+) -> float | None:
+    """Adjust R² for predictor count, or return None when it is undefined."""
+    if r2 is None or sample_count <= feature_count + 1:
+        return None
+    return 1 - (1 - r2) * (sample_count - 1) / (sample_count - feature_count - 1)
+
+
 def _data_fingerprint(data: pd.DataFrame) -> str:
     """Hash values, index, columns, and dtypes to detect stale saved folds."""
     digest = hashlib.sha256()
@@ -90,7 +101,7 @@ def _cross_validation_metrics(
             for fold in cv_folds
         ]
 
-    fold_scores = {"r2": [], "mae": [], "rmse": []}
+    fold_scores = {"r2": [], "adjusted_r2": [], "mae": [], "rmse": []}
     for train_indices, validation_indices in cv_splits:
         actual = target.iloc[validation_indices]
         if actual.nunique() < 2:
@@ -101,7 +112,11 @@ def _cross_validation_metrics(
         model = LinearRegression()
         model.fit(predictors.iloc[train_indices], target.iloc[train_indices])
         predictions = model.predict(predictors.iloc[validation_indices])
-        fold_scores["r2"].append(float(r2_score(actual, predictions)))
+        r2 = float(r2_score(actual, predictions))
+        fold_scores["r2"].append(r2)
+        fold_scores["adjusted_r2"].append(
+            _adjusted_r2(r2, len(validation_indices), len(selected_features))
+        )
         fold_scores["mae"].append(float(mean_absolute_error(actual, predictions)))
         fold_scores["rmse"].append(
             float(np.sqrt(mean_squared_error(actual, predictions)))
@@ -109,6 +124,13 @@ def _cross_validation_metrics(
 
     metrics: dict[str, dict[str, Any]] = {}
     for name, scores in fold_scores.items():
+        if name == "adjusted_r2" and any(score is None for score in scores):
+            metrics[name] = {
+                "mean": None,
+                "std": None,
+                "fold_scores": scores,
+            }
+            continue
         if not np.isfinite(scores).all():
             raise ValueError(
                 "Five-fold cross-validation produced an undefined {} score; "
@@ -155,20 +177,25 @@ def _feature_removal_metrics(
             }
             comparisons = {
                 metric + "_change": (
-                    ablated_metrics[metric]["mean"]
-                    - current_metrics[metric]["mean"]
+                    (
+                        ablated_metrics[metric]["mean"]
+                        - current_metrics[metric]["mean"]
+                    )
+                    if ablated_metrics[metric]["mean"] is not None
+                    and current_metrics[metric]["mean"] is not None
+                    else None
                 )
-                for metric in ("r2", "mae", "rmse")
+                for metric in ("r2", "adjusted_r2", "mae", "rmse")
             }
             limitation = None
         else:
             cv_summary = {
                 metric: {"mean": None, "std": None}
-                for metric in ("r2", "mae", "rmse")
+                for metric in ("r2", "adjusted_r2", "mae", "rmse")
             }
             comparisons = {
                 metric + "_change": None
-                for metric in ("r2", "mae", "rmse")
+                for metric in ("r2", "adjusted_r2", "mae", "rmse")
             }
             limitation = "cannot_fit_without_predictor_features"
 

@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from linear_regression.split_data import _adjusted_r2
+
 
 def _json_float(value: Any, field: str) -> float:
     """Convert a numeric scalar and reject values not representable in JSON."""
@@ -81,8 +83,10 @@ def split_result_to_json(
     supported labels are null, booleans, integers, finite floats, strings,
     dates, datetimes, and recursively supported tuples. Other index label
     types are rejected. Holdout R² is null when it is undefined because there
-    are fewer than two rows or the observed target is constant; MAE and RMSE
-    are still reported whenever at least one holdout row is available.
+    are fewer than two rows or the observed target is constant. Adjusted R² is
+    null when R² is undefined or the holdout has no more than one additional
+    observation beyond the predictor count; MAE and RMSE are still reported
+    whenever at least one holdout row is available.
     """
     if not isinstance(split_result, tuple) or len(split_result) != 4:
         raise TypeError(
@@ -159,10 +163,19 @@ def split_result_to_json(
         actual_values = np.asarray(y_test, dtype=float).reshape(-1)
         if not np.isfinite(predictions).all() or not np.isfinite(actual_values).all():
             raise ValueError("Test predictions and actual values must be finite.")
+        test_r2 = (
+            _json_float(r2_score(actual_values, predictions), "test R^2")
+            if len(actual_values) >= 2 and np.unique(actual_values).size >= 2
+            else None
+        )
+        test_adjusted_r2 = _adjusted_r2(
+            test_r2, len(actual_values), len(feature_names)
+        )
         test_metrics: dict[str, float | None] = {
-            "r2": (
-                _json_float(r2_score(actual_values, predictions), "test R^2")
-                if len(actual_values) >= 2 and np.unique(actual_values).size >= 2
+            "r2": test_r2,
+            "adjusted_r2": (
+                _json_float(test_adjusted_r2, "test adjusted R^2")
+                if test_adjusted_r2 is not None
                 else None
             ),
             "mae": (

@@ -1,10 +1,17 @@
 import json
+from pathlib import Path
 
 from dataset_stats.description import generate_report
 from dataset_stats.model_statistics import generate_model_statistics
 from dataset_stats.open_file import read_csv_files
 from agents_code.linear_regression_agent import linear_regression_agent
+from agents_code.feature_optimization_linear_model import (
+    feature_optimization_linear_model_agent,
+)
 from agents_code.preprocessing_agent import preprocessing_agent
+from linear_regression import create_folds_and_train, split_result_to_json
+from linear_regression.model_selection import select_best_feature_report
+from linear_regression.split_data import _data_fingerprint
 from preproccessing.drop_rows_with_missing_values import remove_missing_values
 from preproccessing.impute_missing_values import (
     fill_missing_values,
@@ -78,6 +85,7 @@ while True:
 print("Preprocessing completed. The processed DataFrame is:")
 print(df)
 print(encoded_columns)
+
 dataset_description = json.loads(generate_report(df, path, target))
 statistics = json.loads(
     generate_model_statistics(
@@ -97,3 +105,97 @@ regression_recommendation = linear_regression_agent(
 )
 print("Linear regression agent returned:")
 print(regression_recommendation)
+
+ranked_models = regression_recommendation["ranked_models"]
+if ranked_models and ranked_models[0]["model_name"] == "LinearRegression":
+    folds_file = (
+        Path(__file__).resolve().parent
+        / "linear_regression"
+        / "folds_{}.json".format(_data_fingerprint(df))
+    )
+    linear_regression_result = create_folds_and_train(
+        df,
+        target_column=target,
+        folds_file=folds_file,
+    )
+    linear_regression_report = split_result_to_json(
+        linear_regression_result,
+        target_column=target,
+    )
+    print("LinearRegression training and cross-validation metrics:")
+    print(linear_regression_report)
+    linear_regression_reports = [json.loads(linear_regression_report)]
+
+    for optimization_iteration in range(5):
+        current_linear_regression_report = linear_regression_reports[-1]
+        feature_optimization_recommendation = (
+            feature_optimization_linear_model_agent(
+                current_linear_regression_report,
+                past_experiences=linear_regression_reports[:-1],
+                iteration_number=optimization_iteration + 1,
+            )
+        )
+        print(
+            "Feature optimization agent returned "
+            "(iteration {}):".format(optimization_iteration + 1)
+        )
+        print(feature_optimization_recommendation)
+
+        if not feature_optimization_recommendation:
+            break
+        if feature_optimization_recommendation.get("action") != "remove_features":
+            raise ValueError(
+                "Feature optimization agent returned an unsupported action."
+            )
+
+        remaining_features = feature_optimization_recommendation[
+            "remaining_features"
+        ]
+        optimized_linear_regression_result = create_folds_and_train(
+            df,
+            target_column=target,
+            features=remaining_features,
+            folds_file=folds_file,
+        )
+        optimized_linear_regression_report = split_result_to_json(
+            optimized_linear_regression_result,
+            target_column=target,
+        )
+        linear_regression_reports.append(
+            json.loads(optimized_linear_regression_report)
+        )
+        print("LinearRegression metrics with optimized features:")
+        #print(optimized_linear_regression_report)
+
+    last_linear_regression_report = linear_regression_reports[-1]
+    print("Last LinearRegression iteration result:")
+    print(json.dumps(last_linear_regression_report, indent=2))
+
+    best_linear_regression_report, ranking_metrics = select_best_feature_report(
+        linear_regression_reports
+    )
+    best_cross_validation = best_linear_regression_report["training"][
+        "cross_validation"
+    ]
+    print("Preferred LinearRegression feature set:")
+    print("Ranking criteria:", ", ".join(ranking_metrics))
+    if "adjusted_r2" not in ranking_metrics:
+        print(
+            "Adjusted R² was not used for ranking because it is unavailable "
+            "for at least one eligible feature set."
+        )
+    for metric in ("r2", "adjusted_r2", "rmse", "mae"):
+        metric_result = best_cross_validation.get(metric)
+        if metric_result is None or metric_result.get("mean") is None:
+            print("{}: unavailable".format(metric))
+            continue
+        print(
+            "{}: {} (std: {})".format(
+                metric,
+                metric_result["mean"],
+                metric_result["std"],
+            )
+        )
+    print("Features:", best_linear_regression_report["features"])
+    print("Feature count:", len(best_linear_regression_report["features"]))
+    print("Model:", best_linear_regression_report["training"]["model"])
