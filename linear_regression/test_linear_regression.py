@@ -323,6 +323,29 @@ def test_split_trains_on_eighty_percent_and_returns_twenty_percent_holdout():
     assert metrics["rmse"]["mean"] == pytest.approx(0.0, abs=1e-10)
 
 
+def test_split_fits_scalers_on_training_rows_and_transforms_holdout():
+    data = _sample_data()
+    permutation = np.random.RandomState(42).permutation(len(data))
+    holdout_count = int(np.ceil(len(data) * 0.2))
+    holdout_indices = permutation[:holdout_count]
+    training_indices = permutation[holdout_count:]
+    holdout_index = int(holdout_indices[0])
+    data.loc[holdout_index, ["x", "target"]] = [1000.0, 5000.0]
+
+    model, x_test, y_test, _ = split_and_train(data, "target", random_state=42)
+
+    assert model.feature_scaler_.mean_ == pytest.approx(
+        data.iloc[training_indices][["x", "z"]].mean().to_numpy()
+    )
+    assert model.target_scaler_.mean_[0] == pytest.approx(
+        data.iloc[training_indices]["target"].mean()
+    )
+    assert x_test.index.equals(data.iloc[holdout_indices].index)
+    assert x_test.loc[holdout_index, "x"] > 100
+    assert y_test.loc[holdout_index] > 100
+    assert model.target_scaler_.mean_[0] != pytest.approx(data["target"].mean())
+
+
 def test_split_uses_only_the_requested_feature_columns():
     """Feature selection is respected for training and holdout predictors."""
     model, x_test, _, _ = split_and_train(

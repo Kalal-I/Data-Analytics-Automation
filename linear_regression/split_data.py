@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
+from sklearn.preprocessing import StandardScaler
 
 from linear_regression.linear_model import (
     RegularizedRegressor,
@@ -107,15 +108,35 @@ def _cross_validation_metrics(
 
     fold_scores = {"r2": [], "adjusted_r2": [], "mae": [], "rmse": []}
     for train_indices, validation_indices in cv_splits:
-        actual = target.iloc[validation_indices]
-        if actual.nunique() < 2:
+        feature_scaler = StandardScaler()
+        fold_predictors_train = pd.DataFrame(
+            feature_scaler.fit_transform(predictors.iloc[train_indices]),
+            columns=selected_features,
+            index=predictors.iloc[train_indices].index,
+        )
+        fold_predictors_validation = pd.DataFrame(
+            feature_scaler.transform(predictors.iloc[validation_indices]),
+            columns=selected_features,
+            index=predictors.iloc[validation_indices].index,
+        )
+        target_scaler = StandardScaler()
+        fold_target_train = pd.Series(
+            target_scaler.fit_transform(
+                target.iloc[train_indices].to_numpy().reshape(-1, 1)
+            ).ravel(),
+            index=target.iloc[train_indices].index,
+        )
+        actual = target_scaler.transform(
+            target.iloc[validation_indices].to_numpy().reshape(-1, 1)
+        ).ravel()
+        if np.unique(actual).size < 2:
             raise ValueError(
                 "Five-fold cross-validation produced an undefined R^2 score; "
                 "a validation fold has a constant target."
             )
         model = _create_regressor(model_type, alpha, l1_ratio)
-        model.fit(predictors.iloc[train_indices], target.iloc[train_indices])
-        predictions = model.predict(predictors.iloc[validation_indices])
+        model.fit(fold_predictors_train, fold_target_train)
+        predictions = model.predict(fold_predictors_validation)
         r2 = float(r2_score(actual, predictions))
         fold_scores["r2"].append(r2)
         fold_scores["adjusted_r2"].append(
@@ -339,7 +360,11 @@ def split_and_train(
 
     Five-fold cross-validation and its metrics are calculated using only the
     80% training partition. Returned standard deviations are population
-    standard deviations across the five fold scores.
+    standard deviations across the five fold scores. Each CV fold fits feature
+    and target scalers on its training rows only. The final scalers are fitted
+    on the outer training partition and applied to the holdout rows; therefore
+    the returned holdout data is standardized, and the model predicts a
+    standardized target.
 
     ``folds`` may be supplied by ``create_folds_and_train`` to guarantee the
     same outer split and CV fold membership across feature-selection runs.
@@ -411,7 +436,33 @@ def split_and_train(
         cv_folds=cv_folds,
         current_metrics=metrics,
     )
-    fit_data = train_data[selected_features + [target_column]]
+    feature_scaler = StandardScaler()
+    x_train = _as_finite_numeric(train_data, selected_features)
+    x_test = _as_finite_numeric(test_data, selected_features)
+    scaled_x_train = pd.DataFrame(
+        feature_scaler.fit_transform(x_train),
+        columns=selected_features,
+        index=train_data.index,
+    )
+    scaled_x_test = pd.DataFrame(
+        feature_scaler.transform(x_test),
+        columns=selected_features,
+        index=test_data.index,
+    )
+    target_scaler = StandardScaler()
+    y_train = _as_finite_numeric(train_data, [target_column])[target_column]
+    y_test = _as_finite_numeric(test_data, [target_column])[target_column]
+    scaled_y_train = pd.Series(
+        target_scaler.fit_transform(y_train.to_numpy().reshape(-1, 1)).ravel(),
+        name=target_column,
+        index=train_data.index,
+    )
+    scaled_y_test = pd.Series(
+        target_scaler.transform(y_test.to_numpy().reshape(-1, 1)).ravel(),
+        name=target_column,
+        index=test_data.index,
+    )
+    fit_data = pd.concat([scaled_x_train, scaled_y_train], axis=1)
     model = train_linear_regression(
         fit_data,
         target_column=target_column,
@@ -419,10 +470,12 @@ def split_and_train(
         alpha=alpha,
         l1_ratio=l1_ratio,
     )
+    model.feature_scaler_ = feature_scaler
+    model.target_scaler_ = target_scaler
     model.feature_removal_tests_ = feature_removal_tests
     return (
         model,
-        test_data[selected_features].copy(),
-        test_data[target_column].copy(),
+        scaled_x_test,
+        scaled_y_test,
         metrics,
     )

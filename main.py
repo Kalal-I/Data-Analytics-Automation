@@ -12,6 +12,10 @@ from agents_code.feature_optimization_linear_model import (
 from agents_code.preprocessing_agent import preprocessing_agent
 from linear_regression import split_result_to_json
 from linear_regression.fold_manager import create_folds_and_train
+from linear_regression.optimization_workflow import (
+    experiment_history_path,
+    run_model_optimization,
+)
 from linear_regression.model_selection import (
     format_best_model_configuration,
     format_model_feature_weights,
@@ -48,20 +52,6 @@ PREPROCESSING_FUNCTIONS = {
 }
 
 
-def _model_optimization_summary(report: dict[str, Any]) -> dict[str, Any]:
-    """Keep experiment context focused on model settings and CV metrics."""
-    training = report["training"]
-    return {
-        "target_column": report["target_column"],
-        "training": {
-            "model": training["model"],
-            "model_type": training["model_type"],
-            "hyperparameters": training["hyperparameters"],
-            "cross_validation": training["cross_validation"],
-        },
-    }
-
-
 #read the files
 path = input("Enter the path to the CSV file or directory: ")
 df = read_csv_files(path)
@@ -95,6 +85,8 @@ while True:
         break
     for column, operations in operation_to_do.items():
         for operation in operations:
+            if operation["function"] == "standard_scale":
+                continue
             function = PREPROCESSING_FUNCTIONS[operation["function"]]
             df = function(df, **operation["inputs"])
 print("Preprocessing completed. The processed DataFrame is:")
@@ -127,74 +119,76 @@ if ranked_models:
         "statistics": statistics,
         "initial_model_ranking": regression_recommendation,
     }
-    model_experiences = []
-    encodings_applied = False
+    df = apply_deferred_encodings(
+        df,
+        deferred_encoding_operations,
+        PREPROCESSING_FUNCTIONS,
+    )
+    print(
+        "Standard scaling will be fit on each training partition "
+        "and then applied to its validation or holdout data."
+    )
+    data_fingerprint = _data_fingerprint(df)
+    folds_file = (
+        Path(__file__).resolve().parent
+        / "linear_regression"
+        / "folds_{}.json".format(data_fingerprint)
+    )
+    history_file = experiment_history_path(
+        Path(__file__).resolve().parent / "linear_regression",
+        data_fingerprint,
+        target,
+    )
 
-    for optimization_iteration in range(5):
-        model_recommendation = feature_optimization_linear_model_agent(
-            current_model_report,
-            past_experiences=model_experiences,
-            iteration_number=optimization_iteration + 1,
+    def evaluate_model(
+        data: Any,
+        target_column: str,
+        model_type: str,
+        hyperparameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        model_result = create_folds_and_train(
+            data,
+            target_column=target_column,
+            model_type=model_type,
+            alpha=float(hyperparameters["alpha"]),
+            l1_ratio=(
+                float(hyperparameters["l1_ratio"])
+                if model_type == "elastic_net"
+                else None
+            ),
+            folds_file=folds_file,
+        )
+        return json.loads(
+            split_result_to_json(model_result, target_column=target_column)
+        )
+
+    def recommend_model(
+        model_report: dict[str, Any],
+        *,
+        past_experiences: list[dict[str, Any]],
+        iteration_number: int,
+    ) -> dict[str, Any]:
+        recommendation = feature_optimization_linear_model_agent(
+            model_report,
+            past_experiences=past_experiences,
+            iteration_number=iteration_number,
         )
         print(
             "Model optimization agent returned "
-            "(iteration {}):".format(optimization_iteration + 1)
+            "(iteration {}):".format(iteration_number)
         )
-        print(model_recommendation)
-        if not model_recommendation:
-            break
+        print(recommendation)
+        return recommendation
 
-        model_type: str = {
-            "Lasso": "lasso",
-            "Ridge": "ridge",
-            "ElasticNet": "elastic_net",
-        }[model_recommendation["model"]]
-        if not encodings_applied:
-            df = apply_deferred_encodings(
-                df,
-                deferred_encoding_operations,
-                PREPROCESSING_FUNCTIONS,
-            )
-            encodings_applied = True
-        folds_file = (
-            Path(__file__).resolve().parent
-            / "linear_regression"
-            / "folds_{}.json".format(_data_fingerprint(df))
-        )
-        hyperparameters = model_recommendation["hyperparameters"]
-        alpha = float(hyperparameters["alpha"])
-        if model_type == "elastic_net":
-            model_result = create_folds_and_train(
-                df,
-                target_column=target,
-                model_type=model_type,
-                alpha=alpha,
-                l1_ratio=float(hyperparameters["l1_ratio"]),
-                folds_file=folds_file,
-            )
-        else:
-            model_result = create_folds_and_train(
-                df,
-                target_column=target,
-                model_type=model_type,
-                alpha=alpha,
-                folds_file=folds_file,
-            )
-        model_report = json.loads(
-            split_result_to_json(
-                model_result,
-                target_column=target,
-            )
-        )
-        model_reports.append(model_report)
-        current_model_report = _model_optimization_summary(model_report)
-        model_experiences.append(current_model_report)
-        #print(
-        #    "{} training and cross-validation metrics:".format(
-        #        model_report["training"]["model"]
-        #    )
-        #)
-        #print(json.dumps(model_report, indent=2))
+    model_reports = run_model_optimization(
+        data=df,
+        target_column=target,
+        initial_model_report=current_model_report,
+        history_path=history_file,
+        data_fingerprint=data_fingerprint,
+        agent=recommend_model,
+        evaluate=evaluate_model,
+    )
 
     if not model_reports:
         raise ValueError(

@@ -76,9 +76,16 @@ The program generates a data-quality report, requests preprocessing decisions,
 filters the decisions through the validator, and applies valid non-encoding
 operations. It computes dataset and model statistics while categorical
 features still contain their original categories. Recommended encodings are
-applied only after a regularized linear-regression configuration is selected
-and before model training. The resulting DataFrame is printed to the console;
-the program does not currently save it to a new CSV file.
+applied only after a regularized linear-regression configuration is selected.
+After the train/test split, `StandardScaler` is fit on the training predictors
+and target only; the fitted scalers transform the holdout data. For
+cross-validation, the scalers are fit separately on each fold's training rows
+and applied to that fold's validation rows. This prevents holdout and
+validation statistics from leaking into training. The regression model and
+reported target metrics are in standardized units; the fitted model exposes
+`feature_scaler_` and `target_scaler_` for transforming inputs or converting
+predictions back to the original units. The processed DataFrame is printed to
+the console; the program does not currently save it to a new CSV file.
 
 Use a single CSV file for the preprocessing run. The CSV loader can read
 directories, but the main preprocessing loop expects one DataFrame and is not

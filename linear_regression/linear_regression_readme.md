@@ -25,6 +25,23 @@ Re-exports the supported package-level API:
 - `create_folds_and_train`
 - `split_result_to_json`
 
+### `optimization_workflow.py`
+
+Runs the regularized model optimization loop. The first agent proposal selects
+Ridge, Lasso, or Elastic Net, then evaluates alpha values `0.1`, `0.5`, `1.0`,
+`10.0`, and `100.0`; Elastic Net keeps the proposed `l1_ratio` fixed across
+those runs. Later agent calls receive each experiment's configuration, status,
+and cross-validation metrics, and the existing model-selection ranking is
+unchanged.
+
+The workflow stores experiment records in a file named
+`experiments_<data fingerprint>_<target hash>.json` beside the saved folds.
+Pending experiments are
+resumed after interruption. Failed experiments retain their error details and
+are treated as terminal; remaining pending initialization configurations can
+still run when the workflow resumes. Agent iteration numbers count agent calls,
+not individual model experiments.
+
 ### `linear_model.py`
 
 Implements numeric validation and `train_linear_regression()`. The fitted
