@@ -49,12 +49,10 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
         past_experiences=[
             {
                 "target_column": "target",
-                "training": {
-                    "model": "Ridge",
-                    "model_type": "ridge",
-                    "hyperparameters": {"alpha": 1.0},
-                    "cross_validation": {"r2": {"mean": 0.8}},
-                },
+                "model": "Elastic Net",
+                "model_type": "elastic_net",
+                "hyperparameters": {"alpha": 0.1, "l1_ratio": 0.5},
+                "cross_validation": {"r2": {"mean": 0.8}},
             }
         ],
     )
@@ -63,6 +61,10 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
     prompt = captured["json"]["prompt"]
     assert "Current iteration number: `3`" in prompt
     assert '"target_column": "target"' in prompt
+    assert '"model": "Elastic Net"' in prompt
+    assert '"model_type": "elastic_net"' in prompt
+    assert '"alpha": 0.1' in prompt
+    assert '"l1_ratio": 0.5' in prompt
     assert '"features"' not in prompt
     assert '"feature_removal_tests"' not in prompt
     assert "<MODEL_OPTIMIZATION_REPORT>" not in prompt

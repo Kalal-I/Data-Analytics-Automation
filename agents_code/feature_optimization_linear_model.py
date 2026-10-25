@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import requests
@@ -32,6 +33,13 @@ def _is_valid_l1_ratio(value):
     return math.isfinite(numeric_value) and 0 < numeric_value <= 1
 
 
+def _has_at_most_one_decimal_place(value):
+    try:
+        return Decimal(str(value)).normalize().as_tuple().exponent >= -1
+    except InvalidOperation:
+        return False
+
+
 system_prompt = """
 # Role: Regularized Multiple Regression Model Selection Agent
 
@@ -56,7 +64,8 @@ Past experiences:
 `<PAST_EXPERIENCES>`
 
 Use past experiments to avoid repeating configurations and to understand how model choice and hyperparameters affect performance.
-
+Each history entry represents one executed experiment. Several experiments may share an agent iteration during initialization; use their actual configurations, statuses, and metrics rather than treating experiment count as agent-call count.
+Every experiment must use a previously untested configuration. Before proposing an experiment, compare its model type and hyperparameters against every entry in the supplied experiment history. Never recommend repeating a successful experiment merely to confirm its result. If the proposed configuration is already present, select another untested configuration. Python independently enforces this rule. The agent must not claim that a configuration is new without verifying the history.
 Your responsibilities are limited to:
 - Selecting one of the three supported regression models.
 - Recommending the required hyperparameters.
@@ -64,7 +73,22 @@ Your responsibilities are limited to:
 - Proposing a meaningful next experiment.
 
 You must not modify the data, preprocessing operations, data splits, or evaluation configuration.
+### Previously Tested Configurations
 
+You will receive `past_experiences`, containing all experiments performed so far, including initialization experiments and experiments proposed by you in previous iterations.
+
+**You must follow these rules:**
+
+1. Before proposing a configuration, inspect `past_experiences` and identify every configuration that has already been tested or attempted.
+2. Initialization experiments are performed automatically before your subsequent iterations. For Ridge and Lasso, the initialization alpha values are `0.1`, `0.5`, `1.0`, `10.0`, and `100.0`. For Elastic Net, these alpha values are tested using the initially selected `l1_ratio`.
+3. Never propose a configuration that already exists in `past_experiences`, regardless of whether its status is `completed`, `failed`, `pending`, or `skipped`.
+4. For Ridge and Lasso, a configuration is a duplicate when both `model_type` and `alpha` match an existing experiment.
+5. For Elastic Net, a configuration is a duplicate when `model_type`, `alpha`, and `l1_ratio` all match an existing experiment.
+6. Initialization experiments count as previously performed configurations. You must not propose them again.
+7. Before returning your proposal, compare it against every relevant entry in `past_experiences`. If it matches any existing configuration, select a different configuration.
+8. Explore untested configurations by changing the model type, alpha, or, for Elastic Net, the l1_ratio as appropriate. All proposed hyperparameters must satisfy the specified validation rules.
+
+Your objective is to propose **one valid, previously untested configuration per iteration**. The Python execution layer independently validates every proposal, so proposing a duplicate is an error.
 ## 2. Model Selection Guidelines
 
 ### Lasso
@@ -331,6 +355,10 @@ def clean_json_output(raw_output):
     alpha = hyperparameters.get("alpha")
     if not _is_positive_finite_number(alpha):
         raise ValueError("Model output alpha must be a positive finite number.")
+    if not _has_at_most_one_decimal_place(alpha):
+        raise ValueError(
+            "Model output alpha must have at most one decimal place."
+        )
     if model == "ElasticNet":
         l1_ratio = hyperparameters.get("l1_ratio")
         if not _is_valid_l1_ratio(l1_ratio):
