@@ -53,7 +53,14 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
                 "model_type": "elastic_net",
                 "hyperparameters": {"alpha": 0.1, "l1_ratio": 0.5},
                 "cross_validation": {"r2": {"mean": 0.8}},
+                "status": "completed",
             }
+        ],
+        ridge_alphas_used=[0.1, 0.5],
+        lasso_alphas_used=[1.0],
+        elastic_net_alphas_used=[10.0],
+        elastic_net_combinations_used=[
+            {"alpha": 10.0, "l1_ratio": 0.4}
         ],
     )
 
@@ -65,6 +72,12 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
     assert '"model_type": "elastic_net"' in prompt
     assert '"alpha": 0.1' in prompt
     assert '"l1_ratio": 0.5' in prompt
+    assert "Ridge:** `[0.1, 0.5]`" in prompt
+    assert "Lasso:** `[1.0]`" in prompt
+    assert "Elastic Net:** `[10.0]`" in prompt
+    assert '"alpha": 10.0, "l1_ratio": 0.4' in prompt
+    assert "execution layer may run it again" in prompt
+    assert "Python independently enforces" not in prompt
     assert '"features"' not in prompt
     assert '"feature_removal_tests"' not in prompt
     assert "<MODEL_OPTIMIZATION_REPORT>" not in prompt
@@ -100,6 +113,28 @@ def test_agent_serializes_dict_input_and_returns_decision(monkeypatch):
             '{"schema_version": 1, "action": "evaluate_model", '
             '"model": "Lasso", "hyperparameters": {"alpha": 1, "l1_ratio": 0.5}}',
             "must not include l1_ratio",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "Ridge", "hyperparameters": {"alpha": 0.15}}',
+            "at most one decimal place",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "ElasticNet", "hyperparameters": '
+            '{"alpha": 1, "l1_ratio": 0}}',
+            "requires l1_ratio",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "ElasticNet", "hyperparameters": '
+            '{"alpha": 1, "l1_ratio": 1.1}}',
+            "requires l1_ratio",
+        ),
+        (
+            '{"schema_version": 1, "action": "evaluate_model", '
+            '"model": "LinearRegression", "hyperparameters": {"alpha": 1}}',
+            "select Lasso, Ridge, or ElasticNet",
         ),
     ],
 )
