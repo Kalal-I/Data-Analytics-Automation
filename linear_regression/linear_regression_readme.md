@@ -7,11 +7,11 @@ cross-validation, reusable saved split assignments, and JSON serialization of
 the results.
 
 The package does **not** clean data, encode categorical variables, impute
-missing values, scale features, select features, or choose a model
-automatically. The split layer can evaluate reduced predictor sets; the
-training function always uses all columns other than the target. Prepare the
-input DataFrame before calling the training functions. Predictors and target
-must be finite real numeric values.
+missing values, or choose a model automatically. The split layer can evaluate
+reduced predictor sets, and its coefficient-based greedy selector ranks
+features from a fitted model and evaluates candidate subsets with
+cross-validation. Prepare the input DataFrame before calling the training
+functions. Predictors and target must be finite real numeric values.
 
 ## Files
 
@@ -25,23 +25,6 @@ Re-exports the supported package-level API:
 - `create_folds_and_train`
 - `split_result_to_json`
 
-### `optimization_workflow.py`
-
-Runs the regularized model optimization loop. The first agent proposal selects
-Ridge, Lasso, or Elastic Net, then evaluates alpha values `0.1`, `0.5`, `1.0`,
-`10.0`, and `100.0`; Elastic Net keeps the proposed `l1_ratio` fixed across
-those runs. Later agent calls receive each experiment's configuration, status,
-and cross-validation metrics, and the existing model-selection ranking is
-unchanged.
-
-The workflow stores experiment records in a file named
-`experiments_<data fingerprint>_<target hash>.json` beside the saved folds.
-Pending experiments are
-resumed after interruption. Failed experiments retain their error details and
-are treated as terminal; remaining pending initialization configurations can
-still run when the workflow resumes. Agent iteration numbers count agent calls,
-not individual model experiments.
-
 ### `linear_model.py`
 
 Implements numeric validation and `train_linear_regression()`. The fitted
@@ -52,6 +35,15 @@ the JSON serializer uses this to report the training sample size.
 
 Implements the reproducible holdout split, cross-validation metrics, and
 validation for saved fold assignments.
+
+### `feature_selection.py`
+
+Ranks fitted-model coefficients by absolute magnitude and greedily evaluates
+feature subsets. A feature is accepted when mean CV R² improves by at least
+`R2_IMPROVEMENT_THRESHOLD` (`0.005`). Invalid coefficients and failed
+evaluations are reported explicitly. The caller supplies an evaluator so
+candidate subsets can keep the selected model configuration and reuse the
+same folds.
 
 ### `fold_manager.py`
 
