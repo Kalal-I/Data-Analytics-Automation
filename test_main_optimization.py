@@ -1,10 +1,12 @@
 import copy
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import main as pipeline
+import linear_regression.optimization_loop as optimization
 
 
 INITIAL_ALPHAS = [0.1, 0.5, 1.0, 10.0, 100.0]
@@ -58,20 +60,22 @@ def _patch_evaluation(monkeypatch):
         executed.append(experiment)
         return experiment
 
-    monkeypatch.setattr(pipeline, "create_folds_and_train", fake_train)
+    monkeypatch.setattr(optimization, "create_folds_and_train", fake_train)
     monkeypatch.setattr(
-        pipeline,
+        optimization,
         "split_result_to_json",
         lambda result, target_column: json.dumps(
             _model_report(result, target_column)
         ),
     )
     monkeypatch.setattr(
-        pipeline,
+        optimization,
         "apply_deferred_encodings",
         lambda *args: args[0],
     )
-    monkeypatch.setattr(pipeline, "_data_fingerprint", lambda *_: "test-data")
+    monkeypatch.setattr(
+        optimization, "_data_fingerprint", lambda *_: "test-data"
+    )
     return executed
 
 
@@ -117,7 +121,7 @@ def test_initializes_five_alphas_and_passes_results_to_next_call(
         return recommendation if len(calls) == 1 else {}
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -128,6 +132,9 @@ def test_initializes_five_alphas_and_passes_results_to_next_call(
 
     assert [experiment["alpha"] for experiment in executed] == INITIAL_ALPHAS
     assert len({experiment["folds_file"] for experiment in executed}) == 1
+    assert executed[0]["folds_file"].parent == Path(
+        optimization.__file__
+    ).resolve().parent
     assert len(calls) == 2
     assert [call["kwargs"]["iteration_number"] for call in calls] == [1, 2]
     assert len(reports) == 5
@@ -181,7 +188,7 @@ def test_normal_optimization_resumes_and_repeated_alpha_remains_executable(
         return recommendations[len(calls) - 1]
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -221,7 +228,7 @@ def test_alpha_histories_are_separate_and_update_after_each_experiment(
         return recommendations[len(calls) - 1]
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -250,7 +257,7 @@ def test_initialization_reports_keep_existing_model_ranking_behavior(monkeypatch
         )
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -305,8 +312,8 @@ def test_greedy_selection_uses_fixed_best_model_configuration_and_common_folds(
             }
         )
 
-    monkeypatch.setattr(pipeline, "create_folds_and_train", fake_train)
-    monkeypatch.setattr(pipeline, "split_result_to_json", fake_serialize)
+    monkeypatch.setattr(optimization, "create_folds_and_train", fake_train)
+    monkeypatch.setattr(optimization, "split_result_to_json", fake_serialize)
     report = {
         "features": ["first", "second"],
         "training": {
