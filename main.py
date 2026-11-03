@@ -6,6 +6,7 @@ from dataset_stats.model_statistics import generate_model_statistics
 from dataset_stats.open_file import read_csv_files
 from agents_code.linear_regression_agent import linear_regression_agent
 from agents_code.preprocessing_agent import preprocessing_agent
+from knn_regression.main_knn_workflow import run_knn_workflow
 from linear_regression.model_selection import (
     select_best_feature_report,
 )
@@ -69,7 +70,7 @@ def main():
     dataset_description = json.loads(generate_report(df, path, target))
     statistics = json.loads(generate_model_statistics(df, target))
     label_type = dataset_description["Reports"][0]["Target column"]["Type"]
-
+    print(statistics)
     regression_recommendation = linear_regression_agent(
         dataset_description=dataset_description,
         target_column=target,
@@ -81,13 +82,31 @@ def main():
     print(regression_recommendation)
 
     ranked_models = regression_recommendation["ranked_models"]
-    linear_models = [
-        model
-        for model in ranked_models
-        if model.get("rank") == 1
-        and model.get("model_name") == "LinearRegression"
-    ]
-    if linear_models:
+    top_model = next(
+        (model for model in ranked_models if model.get("rank") == 1),
+        None,
+    )
+    if top_model and top_model.get("model_name") == "KNeighborsRegressor":
+        knn_data = apply_deferred_encodings(
+            df,
+            deferred_encoding_operations,
+            PREPROCESSING_FUNCTIONS,
+        )
+        knn_result = run_knn_workflow(
+            knn_data,
+            target,
+            interactive=False,
+        )
+        knn_summary = {
+            "selected_features": knn_result["selected_features"],
+            "hyperparameters": knn_result["hyperparameters"],
+            "cross_validation": knn_result["cross_validation"],
+            "holdout_metrics": knn_result["holdout_metrics"],
+        }
+        print("KNN regression results:")
+        print(json.dumps(knn_summary, indent=2, allow_nan=False))
+        return knn_result
+    elif top_model and top_model.get("model_name") == "LinearRegressions": #must be a typo, should be "LinearRegression"
         current_model_report = {
             "target_column": target,
             "dataset_description": dataset_description,

@@ -372,7 +372,11 @@ def test_main_prints_only_accepted_features_and_their_scores(monkeypatch, capsys
     monkeypatch.setattr(
         pipeline,
         "linear_regression_agent",
-        lambda **_: {"ranked_models": [{"model_name": "Lasso"}]},
+        lambda **_: {
+            "ranked_models": [
+                {"rank": 1, "model_name": "LinearRegression"}
+            ]
+        },
     )
     model_report = {
         "target_column": "target",
@@ -427,3 +431,69 @@ def test_main_prints_only_accepted_features_and_their_scores(monkeypatch, capsys
     assert "evaluations" not in output
     assert "Best regularized regression model:" not in output
     assert "Model weights by feature:" not in output
+
+
+def test_main_runs_knn_workflow_when_it_is_ranked_first(monkeypatch, capsys):
+    data = pd.DataFrame({"feature": [1, 2], "target": [2, 4]})
+    knn_data = pd.DataFrame({"encoded_feature": [1, 2], "target": [2, 4]})
+    knn_result = {
+        "selected_features": ["encoded_feature"],
+        "hyperparameters": {"n_neighbors": 3},
+        "cross_validation": {
+            "best_configuration": {"n_neighbors": 3},
+            "results": [],
+        },
+        "holdout_metrics": {"r2": 0.8, "mae": 0.2, "rmse": 0.3},
+        "model": object(),
+    }
+    deferred_calls = []
+    workflow_calls = []
+
+    input_values = iter(["data.csv", "target"])
+    monkeypatch.setattr("builtins.input", lambda _: next(input_values))
+    monkeypatch.setattr(pipeline, "read_csv_files", lambda _: data)
+    monkeypatch.setattr(pipeline, "preprocessing_agent", lambda _: {})
+    monkeypatch.setattr(
+        pipeline,
+        "generate_report",
+        lambda *_: json.dumps(
+            {"Reports": [{"Target column": {"Type": "numeric"}}]}
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "generate_model_statistics",
+        lambda *_: json.dumps({"statistics": {}}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "linear_regression_agent",
+        lambda **_: {
+            "ranked_models": [
+                {"rank": 1, "model_name": "KNeighborsRegressor"},
+                {"rank": 2, "model_name": "LinearRegression"},
+            ]
+        },
+    )
+
+    def fake_apply_encodings(data_arg, operations, preprocessing_functions):
+        deferred_calls.append((data_arg, operations, preprocessing_functions))
+        return knn_data
+
+    def fake_knn_workflow(data_arg, target_arg, **kwargs):
+        workflow_calls.append((data_arg, target_arg, kwargs))
+        return knn_result
+
+    monkeypatch.setattr(pipeline, "apply_deferred_encodings", fake_apply_encodings)
+    monkeypatch.setattr(pipeline, "run_knn_workflow", fake_knn_workflow)
+
+    result = pipeline.main()
+
+    assert result is knn_result
+    assert deferred_calls == [(data, {}, pipeline.PREPROCESSING_FUNCTIONS)]
+    assert workflow_calls == [
+        (knn_data, "target", {"interactive": False})
+    ]
+    output = capsys.readouterr().out
+    assert "KNN regression results:" in output
+    assert '"selected_features": [' in output
