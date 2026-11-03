@@ -1,10 +1,12 @@
 import copy
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import main as pipeline
+import linear_regression.optimization_loop as optimization
 
 
 INITIAL_ALPHAS = [0.1, 0.5, 1.0, 10.0, 100.0]
@@ -58,20 +60,22 @@ def _patch_evaluation(monkeypatch):
         executed.append(experiment)
         return experiment
 
-    monkeypatch.setattr(pipeline, "create_folds_and_train", fake_train)
+    monkeypatch.setattr(optimization, "create_folds_and_train", fake_train)
     monkeypatch.setattr(
-        pipeline,
+        optimization,
         "split_result_to_json",
         lambda result, target_column: json.dumps(
             _model_report(result, target_column)
         ),
     )
     monkeypatch.setattr(
-        pipeline,
+        optimization,
         "apply_deferred_encodings",
         lambda *args: args[0],
     )
-    monkeypatch.setattr(pipeline, "_data_fingerprint", lambda *_: "test-data")
+    monkeypatch.setattr(
+        optimization, "_data_fingerprint", lambda *_: "test-data"
+    )
     return executed
 
 
@@ -117,7 +121,7 @@ def test_initializes_five_alphas_and_passes_results_to_next_call(
         return recommendation if len(calls) == 1 else {}
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -128,6 +132,9 @@ def test_initializes_five_alphas_and_passes_results_to_next_call(
 
     assert [experiment["alpha"] for experiment in executed] == INITIAL_ALPHAS
     assert len({experiment["folds_file"] for experiment in executed}) == 1
+    assert executed[0]["folds_file"].parent == Path(
+        optimization.__file__
+    ).resolve().parent
     assert len(calls) == 2
     assert [call["kwargs"]["iteration_number"] for call in calls] == [1, 2]
     assert len(reports) == 5
@@ -181,7 +188,7 @@ def test_normal_optimization_resumes_and_repeated_alpha_remains_executable(
         return recommendations[len(calls) - 1]
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -221,7 +228,7 @@ def test_alpha_histories_are_separate_and_update_after_each_experiment(
         return recommendations[len(calls) - 1]
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -250,7 +257,7 @@ def test_initialization_reports_keep_existing_model_ranking_behavior(monkeypatch
         )
 
     monkeypatch.setattr(
-        pipeline, "feature_optimization_linear_model_agent", fake_agent
+        optimization, "feature_optimization_linear_model_agent", fake_agent
     )
     reports = pipeline._run_regularized_optimization(
         pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
@@ -305,8 +312,8 @@ def test_greedy_selection_uses_fixed_best_model_configuration_and_common_folds(
             }
         )
 
-    monkeypatch.setattr(pipeline, "create_folds_and_train", fake_train)
-    monkeypatch.setattr(pipeline, "split_result_to_json", fake_serialize)
+    monkeypatch.setattr(optimization, "create_folds_and_train", fake_train)
+    monkeypatch.setattr(optimization, "split_result_to_json", fake_serialize)
     report = {
         "features": ["first", "second"],
         "training": {
@@ -365,7 +372,11 @@ def test_main_prints_only_accepted_features_and_their_scores(monkeypatch, capsys
     monkeypatch.setattr(
         pipeline,
         "linear_regression_agent",
-        lambda **_: {"ranked_models": [{"model_name": "Lasso"}]},
+        lambda **_: {
+            "ranked_models": [
+                {"rank": 1, "model_name": "LinearRegression"}
+            ]
+        },
     )
     model_report = {
         "target_column": "target",
@@ -420,3 +431,69 @@ def test_main_prints_only_accepted_features_and_their_scores(monkeypatch, capsys
     assert "evaluations" not in output
     assert "Best regularized regression model:" not in output
     assert "Model weights by feature:" not in output
+
+
+def test_main_runs_knn_workflow_when_it_is_ranked_first(monkeypatch, capsys):
+    data = pd.DataFrame({"feature": [1, 2], "target": [2, 4]})
+    knn_data = pd.DataFrame({"encoded_feature": [1, 2], "target": [2, 4]})
+    knn_result = {
+        "selected_features": ["encoded_feature"],
+        "hyperparameters": {"n_neighbors": 3},
+        "cross_validation": {
+            "best_configuration": {"n_neighbors": 3},
+            "results": [],
+        },
+        "holdout_metrics": {"r2": 0.8, "mae": 0.2, "rmse": 0.3},
+        "model": object(),
+    }
+    deferred_calls = []
+    workflow_calls = []
+
+    input_values = iter(["data.csv", "target"])
+    monkeypatch.setattr("builtins.input", lambda _: next(input_values))
+    monkeypatch.setattr(pipeline, "read_csv_files", lambda _: data)
+    monkeypatch.setattr(pipeline, "preprocessing_agent", lambda _: {})
+    monkeypatch.setattr(
+        pipeline,
+        "generate_report",
+        lambda *_: json.dumps(
+            {"Reports": [{"Target column": {"Type": "numeric"}}]}
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "generate_model_statistics",
+        lambda *_: json.dumps({"statistics": {}}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "linear_regression_agent",
+        lambda **_: {
+            "ranked_models": [
+                {"rank": 1, "model_name": "KNeighborsRegressor"},
+                {"rank": 2, "model_name": "LinearRegression"},
+            ]
+        },
+    )
+
+    def fake_apply_encodings(data_arg, operations, preprocessing_functions):
+        deferred_calls.append((data_arg, operations, preprocessing_functions))
+        return knn_data
+
+    def fake_knn_workflow(data_arg, target_arg, **kwargs):
+        workflow_calls.append((data_arg, target_arg, kwargs))
+        return knn_result
+
+    monkeypatch.setattr(pipeline, "apply_deferred_encodings", fake_apply_encodings)
+    monkeypatch.setattr(pipeline, "run_knn_workflow", fake_knn_workflow)
+
+    result = pipeline.main()
+
+    assert result is knn_result
+    assert deferred_calls == [(data, {}, pipeline.PREPROCESSING_FUNCTIONS)]
+    assert workflow_calls == [
+        (knn_data, "target", {"interactive": False})
+    ]
+    output = capsys.readouterr().out
+    assert "KNN regression results:" in output
+    assert '"selected_features": [' in output

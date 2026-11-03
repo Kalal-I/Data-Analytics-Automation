@@ -123,14 +123,6 @@ Required hyperparameter:
 
 Recommend numerical starting values that Python can evaluate. Do not claim that a recommended value is optimal before execution.
 
-### Alpha Precision Constraint
-
-- The `alpha` value must be positive and have **at most one decimal place**.
-- Valid examples: `0.1`, `0.2`, `0.5`, `1`, `1.5`, `2`, `10`.
-- Invalid examples: `0.15`, `0.25`, `0.37`, `1.25`.
-- Alpha values do not need to be multiples of `0.1`; any positive value with at most one decimal place is allowed.
-- Check previous experiments and avoid repeating previously tested configurations.
-- Python must independently validate this constraint before executing an experiment.
 ### Other parameters
 
 Use these fixed settings unless the input report explicitly establishes a different required configuration:
