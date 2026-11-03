@@ -10,8 +10,18 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
 
 from dataset_stats.column_analysis import analyze_column
+from knn_regression.knn_model import DEFAULTS as KNN_DEFAULTS
+from knn_regression.knn_model import create_knn_pipeline
+from random_forest_regression.data_split import train_holdout_split
+from random_forest_regression.folds import create_cv_folds
+from random_forest_regression.optimization import (
+    TUNING_PARAMETERS as RF_TUNING_PARAMETERS,
+    evaluate_configuration as evaluate_random_forest_configuration,
+)
+from random_forest_regression.random_forest_model import DEFAULTS as RF_DEFAULTS
 
 DEFAULT_CORRELATION_THRESHOLD = 0.8
 _PEARSON_NEAR_CONSTANT_ULPS = 1 + 4 * np.finfo(float).eps
@@ -944,6 +954,258 @@ def _linear_baseline_residual_diagnostics(
     }
 
 
+def _baseline_model_statistics(
+    numeric_predictors: dict[Any, pd.Series],
+    target_values: pd.Series,
+) -> dict[str, Any]:
+    """Evaluate default Random Forest and KNN models on shared CV folds."""
+    rf_configuration = {
+        name: RF_DEFAULTS[name] for name in RF_TUNING_PARAMETERS
+    }
+    rf_fixed_parameters = {
+        name: value
+        for name, value in RF_DEFAULTS.items()
+        if name not in RF_TUNING_PARAMETERS
+    }
+    models: dict[str, dict[str, Any]] = {
+        "LinearRegression": {
+            "status": "unavailable",
+            "parameters": LinearRegression().get_params(),
+            "metrics": None,
+            "fold_metrics": [],
+        },
+        "RandomForestRegressor": {
+            "status": "unavailable",
+            "parameters": dict(RF_DEFAULTS),
+            "metrics": None,
+            "fold_metrics": [],
+        },
+        "KNeighborsRegressor": {
+            "status": "unavailable",
+            "parameters": dict(KNN_DEFAULTS),
+            "preprocessing": ["StandardScaler"],
+            "metrics": None,
+            "fold_metrics": [],
+        },
+    }
+
+    predictors = {
+        name: values.reset_index(drop=True)
+        for name, values in numeric_predictors.items()
+    }
+    if not predictors:
+        limitation = "no_numeric_predictors"
+    else:
+        complete = pd.DataFrame(predictors)
+        complete["__target__"] = target_values.reset_index(drop=True)
+        complete = complete.replace([np.inf, -np.inf], np.nan).dropna()
+        usable_features = [
+            name
+            for name in predictors
+            if complete[name].nunique(dropna=False) > 1
+        ]
+        complete = complete[usable_features + ["__target__"]]
+
+        if not usable_features:
+            limitation = "no_nonconstant_numeric_predictors"
+        elif len(complete) < 13:
+            limitation = (
+                "80_percent_training_split_has_fewer_than_10_rows_for_"
+                "five_fold_cross_validation"
+            )
+        elif complete["__target__"].nunique() < 2:
+            limitation = "constant_target_in_complete_numeric_rows"
+        else:
+            training, _, y_train, _ = train_holdout_split(
+                complete,
+                "__target__",
+                random_state=42,
+            )
+            X_train = training[usable_features]
+            folds = create_cv_folds(
+                X_train,
+                n_splits=5,
+                shuffle=True,
+                random_state=42,
+            )
+            linear_fold_metrics = []
+            for fold_number, fold in enumerate(folds, start=1):
+                model = LinearRegression()
+                fold_X_train = X_train.iloc[fold.train_indices]
+                fold_X_validation = X_train.iloc[fold.validation_indices]
+                fold_y_train = y_train.iloc[fold.train_indices]
+                fold_y_validation = y_train.iloc[fold.validation_indices]
+                model.fit(fold_X_train, fold_y_train)
+                predictions = model.predict(fold_X_validation)
+                residuals = fold_y_validation.to_numpy(dtype=float) - np.asarray(
+                    predictions, dtype=float
+                )
+                metrics = {
+                    "r2": round(float(r2_score(fold_y_validation, predictions)), 12),
+                    "mae": round(
+                        float(mean_absolute_error(fold_y_validation, predictions)),
+                        12,
+                    ),
+                    "rmse": round(float(np.sqrt(np.mean(residuals**2))), 12),
+                }
+                if not all(math.isfinite(value) for value in metrics.values()):
+                    raise ValueError(
+                        "LinearRegression baseline evaluation produced "
+                        "non-finite metrics in fold {}.".format(fold_number)
+                    )
+                linear_fold_metrics.append(
+                    {
+                        "fold": fold_number,
+                        "training_row_count": int(len(fold.train_indices)),
+                        "validation_row_count": int(len(fold.validation_indices)),
+                        **metrics,
+                    }
+                )
+            linear_metrics_summary = {
+                metric: {
+                    "mean": round(
+                        float(
+                            np.mean(
+                                [fold[metric] for fold in linear_fold_metrics]
+                            )
+                        ),
+                        12,
+                    ),
+                    "std": round(
+                        float(
+                            np.std(
+                                [fold[metric] for fold in linear_fold_metrics]
+                            )
+                        ),
+                        12,
+                    ),
+                }
+                for metric in ("r2", "mae", "rmse")
+            }
+            models["LinearRegression"].update(
+                {
+                    "status": "evaluated",
+                    "metrics": linear_metrics_summary,
+                    "fold_metrics": linear_fold_metrics,
+                    "feature_columns": [str(name) for name in usable_features],
+                    "training_row_count": int(len(X_train)),
+                    "cv_fold_count": len(folds),
+                }
+            )
+            rf_result = evaluate_random_forest_configuration(
+                X_train,
+                y_train,
+                folds,
+                rf_configuration,
+                fixed_params=rf_fixed_parameters,
+                random_state=42,
+            )
+            rf_fold_metrics = [
+                {"fold": fold_number, **fold_metrics}
+                for fold_number, fold_metrics in enumerate(
+                    rf_result["fold_metrics"],
+                    start=1,
+                )
+            ]
+            models["RandomForestRegressor"].update(
+                {
+                    "status": (
+                        "evaluated"
+                        if rf_result["mean_std"]["r2"]["mean"] is not None
+                        else "failed"
+                    ),
+                    "metrics": rf_result["mean_std"],
+                    "fold_metrics": rf_fold_metrics,
+                    "failures": rf_result["failures"],
+                    "feature_columns": [str(name) for name in usable_features],
+                    "training_row_count": int(len(X_train)),
+                    "cv_fold_count": len(folds),
+                }
+            )
+
+            knn_fold_metrics = []
+            for fold_number, fold in enumerate(folds, start=1):
+                fold_model = create_knn_pipeline(**KNN_DEFAULTS)
+                fold_X_train = X_train.iloc[fold.train_indices]
+                fold_X_validation = X_train.iloc[fold.validation_indices]
+                fold_y_train = y_train.iloc[fold.train_indices]
+                fold_y_validation = y_train.iloc[fold.validation_indices]
+                fold_model.fit(fold_X_train, fold_y_train)
+                predictions = fold_model.predict(fold_X_validation)
+                residuals = fold_y_validation.to_numpy(dtype=float) - np.asarray(
+                    predictions, dtype=float
+                )
+                metrics = {
+                    "r2": round(float(r2_score(fold_y_validation, predictions)), 12),
+                    "mae": round(
+                        float(mean_absolute_error(fold_y_validation, predictions)),
+                        12,
+                    ),
+                    "rmse": round(float(np.sqrt(np.mean(residuals**2))), 12),
+                }
+                if not all(math.isfinite(value) for value in metrics.values()):
+                    raise ValueError(
+                        "KNeighborsRegressor baseline evaluation produced "
+                        "non-finite metrics in fold {}.".format(fold_number)
+                    )
+                knn_fold_metrics.append(
+                    {
+                        "fold": fold_number,
+                        "training_row_count": int(len(fold.train_indices)),
+                        "validation_row_count": int(len(fold.validation_indices)),
+                        **metrics,
+                    }
+                )
+            knn_metrics_summary = {
+                metric: {
+                    "mean": round(
+                        float(np.mean([fold[metric] for fold in knn_fold_metrics])),
+                        12,
+                    ),
+                    "std": round(
+                        float(np.std([fold[metric] for fold in knn_fold_metrics])),
+                        12,
+                    ),
+                }
+                for metric in ("r2", "mae", "rmse")
+            }
+            models["KNeighborsRegressor"].update(
+                {
+                    "status": "evaluated",
+                    "metrics": knn_metrics_summary,
+                    "fold_metrics": knn_fold_metrics,
+                    "feature_columns": [str(name) for name in usable_features],
+                    "training_row_count": int(len(X_train)),
+                    "cv_fold_count": len(folds),
+                }
+            )
+            limitation = None
+
+    if limitation is not None:
+        for result in models.values():
+            result["limitation"] = limitation
+
+    return {
+        "evaluation": {
+            "method": "five_fold_cross_validation",
+            "outer_training_fraction": 0.80,
+            "n_splits": 5,
+            "shuffle": True,
+            "random_state": 42,
+            "predictor_scope": (
+                "complete-case numeric predictors available before deferred "
+                "categorical encoding"
+            ),
+            "fold_strategy": (
+                "Random Forest train_holdout_split and create_cv_folds with "
+                "random_state=42. LinearRegression and KNN reuse these exact "
+                "outer training rows and CV fold assignments."
+            ),
+        },
+        "models": models,
+    }
+
+
 def _build_warnings(
     target_report: dict[str, Any],
     relationships: list[dict[str, Any]],
@@ -1017,6 +1279,10 @@ def generate_model_statistics(
     original correlation evidence. Nonlinear screens and residual diagnostics
     are in-sample heuristics, not significance tests or estimates of
     out-of-sample performance.
+    Default LinearRegression, Random Forest, and KNN baselines are evaluated
+    on the same seeded 80/20 training split and shuffled five-fold CV folds,
+    using complete-case numeric predictors. Their metrics are reported
+    separately from descriptive and in-sample diagnostic screens.
 
     ``one_hot_encoded_features`` lists predictor column names created by
     one-hot encoding. They remain included in valid association, mutual
@@ -1122,6 +1388,9 @@ def generate_model_statistics(
     residual_diagnostics = _linear_baseline_residual_diagnostics(
         numeric_predictors, target_values
     )
+    baseline_model_performance = _baseline_model_statistics(
+        numeric_predictors, target_values
+    )
     warnings = _build_warnings(target_report, relationships)
     binary_validation = {
         name: bool(feature_reports[name]["encoding"]["binary_values_verified"])
@@ -1170,6 +1439,7 @@ def generate_model_statistics(
         "missingness_patterns": missingness,
         "nonlinear_relationship_screening": nonlinear_screening,
         "linear_baseline_residual_diagnostics": residual_diagnostics,
+        "baseline_model_performance": baseline_model_performance,
         "diagnostic_interpretation": (
             "Mutual information, nonlinear/interaction screens, and residual "
             "diagnostics use numeric values only. The nonlinear, interaction, "

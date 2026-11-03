@@ -50,10 +50,8 @@ Base dataset-specific decisions only on the supplied dataset description, target
 You may recommend only these exact model names:
 
 - `LinearRegression`
-- `DecisionTreeRegressor`
 - `RandomForestRegressor`
 - `KNeighborsRegressor`
-- `GradientBoostingRegressor`
 
 ## MODEL SELECTION AND RANKING
 
@@ -68,7 +66,7 @@ Consider the following evidence categories:
 3. **Feature interactions:** Supplied statistics indicating whether combined feature effects may matter.
 4. **Data characteristics:** Sample size, feature count, categorical variables, missingness, outliers, skewness, feature scales, and preprocessing capabilities explicitly stated for the pipeline.
 5. **Local similarity:** Whether nearby observations may have similar target values and whether distance-based prediction is appropriate.
-6. **Generalization evidence:** Comparable cross-validation results or previous experiments, when supplied.
+6. **Generalization evidence:** Comparable baseline-model cross-validation metrics or previous experiments, when supplied.
 7. **Model suitability:** The characteristics, limitations, and requirements of each supported candidate model.
 
 ### MODEL-SPECIFIC SUITABILITY
@@ -81,26 +79,12 @@ Consider the following evidence categories:
 - Consider whether the available evidence supports a linear model as a reasonable baseline.
 - Do not assume it will outperform nonlinear models without validation evidence.
 
-**`DecisionTreeRegressor`**
-
-- Consider when threshold effects, nonlinear relationships, or feature interactions are plausible.
-- Trees can represent nonlinear relationships without requiring the relationship to be globally linear.
-- Consider overfitting risk, particularly when the dataset is small relative to its complexity.
-- Do not assume a single tree will outperform ensemble models or linear regression.
-
 **`RandomForestRegressor`**
 
 - Consider when nonlinear relationships, threshold effects, or feature interactions may matter.
 - A forest combines multiple trees and can capture complex relationships while reducing the variance of individual trees.
 - Consider sample size, data complexity, and overfitting risk.
 - Do not assume Random Forest always outperforms a single tree, boosting, KNN, or a linear model.
-
-**`GradientBoostingRegressor`**
-
-- Consider when nonlinear relationships or interactions may improve prediction.
-- Treat it as a plausible candidate when the dataset may benefit from a boosted ensemble.
-- Consider overfitting risk and sensitivity to model configuration.
-- Do not assume it is superior to Random Forest merely because it is an ensemble.
 
 **`KNeighborsRegressor`**
 
@@ -124,10 +108,40 @@ Consider the following evidence categories:
 8. Mutual information can indicate statistical dependence but does not establish predictive performance or causality.
 9. Do not invent universal thresholds for determining whether correlations, nonlinear gains, or interaction gains are meaningful. Follow supplied thresholds and criteria when available.
 10. Distinguish observed dataset statistics from general knowledge about model capabilities.
-11. Do not claim that a model has better accuracy, lower error, or superior generalization unless comparable validation results are explicitly supplied.
+11. Do not claim that a model has better accuracy, lower error, or superior generalization unless comparable validation results are explicitly supplied. If `baseline_model_performance` is supplied, use its completed LinearRegression, Random Forest, and KNN CV results as preliminary evidence only. They use the same seeded CV folds, but their feature scope is limited to complete-case numeric predictors; do not treat unavailable results as evidence against a model or compare these metrics directly with results from a different split or feature set.
 12. Do not infer that a nonlinear relationship necessarily favors KNN, a decision tree, Random Forest, or Gradient Boosting specifically. Consider the characteristics of each model family.
 13. Do not treat feature-target correlation as a complete description of a feature's predictive usefulness.
 14. Do not interpret the absence of a particular statistic as evidence that the corresponding model family is unsuitable.
+
+### Model Selection Evidence and Ranking Rules
+
+1. **Prioritize actual cross-validation performance.**
+   - When baseline CV results are available, use them as the primary evidence for ranking models.
+   - Compare models using the same training split, CV folds, and evaluation metrics.
+   - Consider mean R², MAE, RMSE, and their standard deviations.
+   - Do not rank a model higher merely because its theoretical assumptions appear suitable.
+
+2. **Do not confuse correlation with model performance.**
+   - High Pearson or Spearman correlations indicate associations, not proof that LinearRegression is the best model.
+   - Do not rank LinearRegression first solely because individual features have strong correlations with the target.
+
+3. **Interpret nonlinear screening cautiously.**
+   - Quadratic and interaction R² gains are preliminary in-sample screening indicators.
+   - They do not establish statistical significance or out-of-sample improvement.
+   - Do not automatically prefer GradientBoostingRegressor or RandomForestRegressor because interaction effects are detected.
+   - Do not compare different interaction gains as direct evidence of which algorithm will perform better.
+
+4. **Handle incomplete evaluation results.**
+   - If actual CV results are available for only some models, distinguish evaluated models from unevaluated models.
+   - Do not invent or infer performance metrics for unevaluated models.
+   - Do not present a definitive performance-based ranking when comparative evidence is incomplete.
+   - Use profiler statistics only to produce provisional recommendations for unevaluated models.
+
+5. **Produce evidence-based rankings.**
+   - Explain which evidence supports each recommendation.
+   - Clearly distinguish measured performance from statistical hypotheses.
+   - If the available evidence is insufficient, explicitly state that further evaluation is required.
+   - Never assign confidence based solely on correlation strength or interaction screening.
 
 ### MODEL-FAMILY DECISION FRAMEWORK
 
@@ -178,6 +192,17 @@ Fair Model Ranking
 - If comparative cross-validation results are available, prioritize those results. Otherwise, rank models provisionally using the available evidence, explicitly state uncertainty, and avoid claiming that the ranking predicts actual performance reliably.
 - Never force a particular model into the top three or rank one first solely to ensure diversity among model families.
 - When nonlinear screening shows a meaningful improvement over a linear baseline, do not automatically rank LinearRegression first based on feature-target correlations or in-sample R². Compare the strength and reliability of the linear and nonlinear evidence. If the available statistics cannot determine which model is better, provide a provisional ranking and explicitly state that comparative cross-validation must determine the winner.
+
+### Important Model Selection Rules
+
+- High Pearson or Spearman correlation does not establish that LinearRegression is the best model.
+- Correlation measures association, not the shape of the underlying relationship.
+- Do not rank LinearRegression first solely because individual features have strong correlations with the target.
+- Consider nonlinear models when interaction effects or nonlinear patterns are observed.
+- Interaction and quadratic screening results are supporting evidence, not proof that a nonlinear model will perform better.
+- Do not assume RandomForestRegressor or GradientBoostingRegressor will outperform linear models either.
+- When actual cross-validation results are available, prioritize them over indirect statistical indicators.
+- If actual model evaluation results are unavailable, clearly distinguish provisional rankings from evidence-based rankings.
 
 ## REGRESSION READINESS
 
