@@ -9,6 +9,189 @@ import main as pipeline
 
 INITIAL_ALPHAS = [0.1, 0.5, 1.0, 10.0, 100.0]
 
+INITIAL_C_VALUES = [0.01, 0.1, 1.0, 10.0, 100.0]
+
+
+def test_logistic_initialization_uses_native_configuration_and_reused_folds(monkeypatch):
+    applied = []
+    evaluated = []
+    calls = []
+    data = pd.DataFrame({
+        "feature": [0, 1, 0, 1, 0, 1],
+        "target": [0, 1, 0, 1, 0, 1],
+    })
+
+    monkeypatch.setattr(
+        pipeline,
+        "apply_deferred_encodings",
+        lambda frame, operations, functions: (
+            applied.append((frame, operations)) or frame
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "validate_features",
+        lambda frame, target: ["feature"],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "train_holdout_split",
+        lambda frame, target: (
+            frame[["feature"]].iloc[:4],
+            frame[["feature"]].iloc[4:],
+            frame["target"].iloc[:4],
+            frame["target"].iloc[4:],
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "create_cv_folds",
+        lambda *args, **kwargs: ["fold"],
+    )
+
+    def fake_evaluate(X, y, folds, configuration):
+        evaluated.append(copy.deepcopy(configuration))
+        return {
+            "configuration": configuration,
+            "mean_std": {
+                "accuracy": {"mean": 0.8, "std": 0.1},
+                "f1": {"mean": 0.8, "std": 0.1},
+            },
+        }
+
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_configuration",
+        fake_evaluate,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "fit_model",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_holdout",
+        lambda *args, **kwargs: {
+            "accuracy": 0.8,
+            "f1": 0.8,
+            "confusion_matrix": [[1, 0], [0, 1]],
+        },
+    )
+
+    def fake_agent(report, **kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        return (
+            {
+                "schema_version": 1,
+                "action": "evaluate_model",
+                "model": "ElasticNet",
+                "hyperparameters": {"C": 2.0, "l1_ratio": 0.4},
+            }
+            if len(calls) == 1
+            else {}
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "logistic_regression_agent",
+        fake_agent,
+    )
+
+    reports = pipeline._run_logistic_regression_optimization(
+        data,
+        "target",
+        {"target_column": "target"},
+        {"feature": [{"function": "one_hot_encode", "inputs": {}}]},
+    )
+
+    assert len(applied) == 1
+    assert [configuration["C"] for configuration in evaluated] == INITIAL_C_VALUES
+    assert all(configuration["penalty"] == "elasticnet" for configuration in evaluated)
+    assert all(configuration["l1_ratio"] == 0.4 for configuration in evaluated)
+    assert len(reports) == 5
+    assert len(calls) == 2
+    assert calls[1]["elastic_net_c_values_used"] == INITIAL_C_VALUES
+    assert calls[1]["elastic_net_combinations_used"] == [
+        {"C": C_value, "l1_ratio": 0.4}
+        for C_value in INITIAL_C_VALUES
+    ]
+
+
+def test_logistic_c_histories_and_agent_stopping(monkeypatch):
+    recommendations = [
+        {"model": "Ridge", "hyperparameters": {"C": 1.5}},
+        {"model": "Lasso", "hyperparameters": {"C": 0.3}},
+        {
+            "model": "ElasticNet",
+            "hyperparameters": {"C": 0.7, "l1_ratio": 0.25},
+        },
+        {},
+    ]
+    calls = []
+
+    monkeypatch.setattr(
+        pipeline,
+        "apply_deferred_encodings",
+        lambda frame, *args: frame,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "validate_features",
+        lambda frame, target: ["feature"],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "train_holdout_split",
+        lambda frame, target: (
+            frame[["feature"]],
+            frame[["feature"]],
+            frame["target"],
+            frame["target"],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "create_cv_folds", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_configuration",
+        lambda X, y, folds, configuration: {
+            "configuration": configuration,
+            "mean_std": {
+                "accuracy": {"mean": 0.5, "std": 0.1},
+                "f1": {"mean": 0.5, "std": 0.1},
+            },
+        },
+    )
+    monkeypatch.setattr(pipeline, "fit_model", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_holdout",
+        lambda *args, **kwargs: {"accuracy": 0.5, "f1": 0.5},
+    )
+
+    def fake_agent(report, **kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        return recommendations[len(calls) - 1]
+
+    monkeypatch.setattr(pipeline, "logistic_regression_agent", fake_agent)
+
+    reports = pipeline._run_logistic_regression_optimization(
+        pd.DataFrame({"feature": [0, 1], "target": [0, 1]}),
+        "target",
+        {"target_column": "target"},
+        {},
+    )
+
+    assert len(calls) == 4
+    assert len(reports) == 7
+    final_histories = calls[-1]
+    assert final_histories["ridge_c_values_used"] == INITIAL_C_VALUES
+    assert final_histories["lasso_c_values_used"] == [0.3]
+    assert final_histories["elastic_net_c_values_used"] == [0.7]
+    assert final_histories["elastic_net_combinations_used"] == [
+        {"C": 0.7, "l1_ratio": 0.25}
+    ]
+
 
 def _model_report(experiment, target_column):
     alpha = experiment["alpha"]
