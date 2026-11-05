@@ -10,6 +10,7 @@ from .optimization import (
     optimize_hyperparameters, random_search, evaluate_configuration,
     evaluate_holdout, TUNING_PARAMETERS,
 )
+from .tuning_report import build_tuning_report
 from .main_rf_workflow import run_random_forest_workflow, run_rf_workflow
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "create_random_forest_model", "fit_random_forest_model",
     "predict_random_forest", "optimize_hyperparameters", "random_search",
     "evaluate_configuration", "evaluate_holdout", "TUNING_PARAMETERS",
+    "build_tuning_report",
     "run_random_forest_workflow", "run_rf_workflow",
 ]

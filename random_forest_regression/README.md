@@ -10,6 +10,7 @@ A standalone Random Forest Regression module for reproducible feature selection,
 | `feature_selection.py` | Validates explicit features or selects numeric, nonconstant predictors. | `validate_features`, `select_features` |
 | `random_forest_model.py` | Creates, fits, and predicts Random Forest regressors. | `create_random_forest_model`, `fit_random_forest_model`, `predict_random_forest` |
 | `optimization.py` | Samples bounded configurations and evaluates deterministic CV. | `random_search`, `optimize_hyperparameters`, `evaluate_configuration`, `evaluate_holdout` |
+| `tuning_report.py` | Summarizes existing tuning trials for compact agent consumption. | `build_tuning_report` |
 | `main_rf_workflow.py` | Coordinates the complete workflow and returns all results. | `run_random_forest_workflow`, `run_rf_workflow`, `main` |
 | `tests/` | Tests splitting, folds, features, tuning, and workflow behavior. | pytest test functions |
 
@@ -52,8 +53,20 @@ result = run_random_forest_workflow(
 print(result["selected_features"])
 print(result["best_configuration"])
 print(result["cross_validation"])
+print(result["tuning_report"])
 print(result["holdout_metrics"])
 ```
+
+The workflow's `tuning_report` includes the best configuration and CV score,
+overall trial counts and summary, the top 10 configurations, and descriptive
+parameter/value score summaries when at least two trials support multiple
+observed values. These summaries are not causal evidence. To retrieve every
+ranked trial with its configuration, CV mean/std metrics, fold metrics, and
+failures, pass the existing `cross_validation` result to
+`build_tuning_report(result["cross_validation"], include_history=True)` after
+importing `build_tuning_report` from `random_forest_regression`.
+Report generation reuses the recorded tuning results and performs no model
+fits.
 
 ## 5. Detailed explanations
 

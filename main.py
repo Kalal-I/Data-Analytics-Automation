@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from typing import Any
 
 from dataset_stats.description import generate_report
 from dataset_stats.model_statistics import generate_model_statistics
@@ -11,26 +10,17 @@ from agents_code.feature_optimization_linear_model import (
 )
 from agents_code.logistic_regression_agent import logistic_regression_agent
 from agents_code.preprocessing_agent import preprocessing_agent
-from linear_regression import split_result_to_json
-from linear_regression.fold_manager import create_folds_and_train
+from agents_code.rfr_agent import rfr_agent
+from knn_regression.main_knn_workflow import run_knn_workflow
 from linear_regression.model_selection import (
     select_best_feature_report,
 )
-from linear_regression.feature_selection import (
-    greedy_coefficient_feature_selection,
+from linear_regression.optimization_loop import (
+    PREPROCESSING_FUNCTIONS,
+    _run_greedy_feature_selection,
+    _run_regularized_optimization,
 )
 from linear_regression.split_data import _data_fingerprint
-from preproccessing.drop_rows_with_missing_values import remove_missing_values
-from preproccessing.impute_missing_values import (
-    fill_missing_values,
-    fill_missing_values_by_group,
-)
-from preproccessing.one_hot_encoding import one_hot_encode
-from preproccessing.standard_scaler import standard_scale
-from preproccessing.label_encoding import label_encode
-from preproccessing.min_max_scaler import min_max_scale
-from preproccessing.ordinal_encoding import ordinal_encode
-from preproccessing.outlier_detection import detect_outliers
 from preproccessing.validation import validate_preprocessing_calls
 from preproccessing.deferred_encoding import (
     apply_deferred_encodings,
@@ -41,18 +31,18 @@ from logistic_regression.feature_selection import validate_features
 from logistic_regression.folds import create_cv_folds
 from logistic_regression.logistic_model import fit_model
 from logistic_regression.optimization import evaluate_configuration, evaluate_holdout
+from random_forest_regression.main_rf_workflow import (
+    run_random_forest_workflow,
+)
+from random_forest_regression.optimization import (
+    TUNING_PARAMETERS,
+)
+from random_forest_regression.random_forest_model import (
+    DEFAULTS as RF_DEFAULTS,
+    validate_model_params,
+)
+from random_forest_regression.tuning_report import build_tuning_report
 
-PREPROCESSING_FUNCTIONS = {
-    "fill_missing_values": fill_missing_values,
-    "fill_missing_values_by_group": fill_missing_values_by_group,
-    "remove_missing_values": remove_missing_values,
-    "one_hot_encode": one_hot_encode,
-    "standard_scale": standard_scale,
-    "label_encode": label_encode,
-    "min_max_scale": min_max_scale,
-    "ordinal_encode": ordinal_encode,
-    "detect_outliers": detect_outliers,
-}
 
 INITIAL_ALPHA_VALUES = (0.1, 0.5, 1.0, 10.0, 100.0)
 INITIAL_C_VALUES = (0.01, 0.1, 1.0, 10.0, 100.0)
@@ -61,123 +51,234 @@ MODEL_TYPES = {
     "Ridge": "ridge",
     "ElasticNet": "elastic_net",
 }
-
-
-def _model_optimization_summary(report: dict[str, Any]) -> dict[str, Any]:
-    """Keep experiment context focused on model settings and CV metrics."""
-    training = report["training"]
-    return {
-        "target_column": report["target_column"],
-        "model": training["model"],
-        "model_type": training["model_type"],
-        "hyperparameters": training["hyperparameters"],
-        "cross_validation": training["cross_validation"],
-        "status": "completed",
+def _rf_experience(iteration_number, result, reasoning=None):
+    experience = {
+        "iteration_number": iteration_number,
+        "status": (
+            "completed"
+            if result["mean_std"]["r2"]["mean"] is not None
+            else "failed"
+        ),
+        "parameters": dict(result["configuration"]),
+        "metrics": {"cross_validation": result["mean_std"]},
     }
+    if result.get("failures"):
+        experience["failures"] = result["failures"]
+    if reasoning is not None:
+        experience["reasoning"] = reasoning
+    return experience
 
 
-def _run_regularized_optimization(
-    df,
-    target: str,
-    current_model_report: dict[str, Any],
-    deferred_encoding_operations: dict[str, Any],
-) -> list[dict[str, Any]]:
-    model_reports: list[dict[str, Any]] = []
-    model_experiences: list[dict[str, Any]] = []
-    alpha_histories = {
-        "ridge_alphas_used": [],
-        "lasso_alphas_used": [],
-        "elastic_net_alphas_used": [],
-        "elastic_net_combinations_used": [],
-    }
-    encodings_applied = False
-    folds_file = None
+def _rf_performance_key(metrics):
+    r2 = metrics["r2"]["mean"]
+    rmse = metrics["rmse"]["mean"]
+    mae = metrics["mae"]["mean"]
+    r2_std = metrics["r2"]["std"]
+    if None in (r2, rmse, mae, r2_std):
+        return None
+    return r2, -rmse, -mae, -r2_std
 
-    for optimization_iteration in range(5):
-        model_recommendation = feature_optimization_linear_model_agent(
-            current_model_report,
-            past_experiences=model_experiences,
-            iteration_number=optimization_iteration + 1,
-            **alpha_histories,
+
+def _run_random_forest_optimization(data, target, dataset_statistics):
+    """Run the default search, then evaluate up to five agent proposals."""
+    baseline_result = run_random_forest_workflow(data, target)
+    baseline_search = baseline_result["cross_validation"]["results"]
+    past_experiences = [
+        _rf_experience(0, result) for result in baseline_search
+    ]
+    tuning_report = baseline_result.get("tuning_report")
+    if tuning_report is None:
+        tuning_report = build_tuning_report(
+            baseline_result["cross_validation"]
         )
+    agent_experiences = [
+        {
+            "iteration_number": 0,
+            "status": "tuning_summary",
+            "tuning_report": tuning_report,
+        }
+    ]
+
+    default_configuration = {
+        name: RF_DEFAULTS[name] for name in TUNING_PARAMETERS
+    }
+    default_search_result = next(
+        (
+            result
+            for result in baseline_search
+            if result["configuration"] == default_configuration
+        ),
+        None,
+    )
+    best_configuration = dict(baseline_result["best_configuration"])
+    best_result = baseline_result
+    best_search_result = next(
+        (
+            result
+            for result in baseline_search
+            if result["configuration"] == best_configuration
+        ),
+        None,
+    )
+    if best_search_result is None:
+        raise RuntimeError(
+            "The default random-forest search did not return its best configuration."
+        )
+    best_performance = _rf_performance_key(best_search_result["mean_std"])
+    if best_performance is None:
+        raise RuntimeError(
+            "The default random-forest search returned unusable cross-validation metrics."
+        )
+
+    default_result = (
+        baseline_result
+        if best_configuration == default_configuration
+        else None
+    )
+    if default_search_result is None:
+        default_result = run_random_forest_workflow(
+            data,
+            target,
+            search_space={
+                name: [default_configuration[name]]
+                for name in TUNING_PARAMETERS
+            },
+            n_iter=1,
+        )
+        default_search = default_result["cross_validation"]["results"]
+        if (
+            len(default_search) != 1
+            or default_search[0]["configuration"] != default_configuration
+        ):
+            raise RuntimeError(
+                "The default random-forest configuration was not evaluated exactly once."
+            )
+        default_search_result = default_search[0]
+        past_experiences.append(_rf_experience(0, default_search_result))
+    agent_experiences.append(
+        _rf_experience(0, default_search_result)
+    )
+
+    default_performance = _rf_performance_key(
+        default_search_result["mean_std"]
+    )
+    if default_performance is None:
+        raise RuntimeError(
+            "The default random-forest configuration returned unusable cross-validation metrics."
+        )
+    if default_performance > best_performance:
+        if default_result is None:
+            default_result = run_random_forest_workflow(
+                data,
+                target,
+                search_space={
+                    name: [default_configuration[name]]
+                    for name in TUNING_PARAMETERS
+                },
+                n_iter=1,
+            )
+            default_search = default_result["cross_validation"]["results"]
+            if (
+                len(default_search) != 1
+                or default_search[0]["configuration"] != default_configuration
+            ):
+                raise RuntimeError(
+                    "The default random-forest configuration was not evaluated exactly once."
+                )
+        best_configuration = dict(default_configuration)
+        best_result = default_result
+        best_performance = default_performance
+
+    current_configuration = dict(best_configuration)
+    evaluated_configurations = {
+        tuple(result["configuration"][name] for name in TUNING_PARAMETERS)
+        for result in baseline_search
+    }
+    evaluated_configuration_history = []
+    for result in baseline_search:
+        configuration = {
+            name: result["configuration"][name] for name in TUNING_PARAMETERS
+        }
+        if configuration not in evaluated_configuration_history:
+            evaluated_configuration_history.append(configuration)
+    default_key = tuple(
+        default_configuration[name] for name in TUNING_PARAMETERS
+    )
+    if default_key not in evaluated_configurations:
+        evaluated_configuration_history.append(default_configuration)
+    evaluated_configurations.add(default_key)
+    agent_iterations = 0
+
+    for iteration_number in range(1, 6):
+        recommendation = rfr_agent(
+            dataset_statistics=dataset_statistics,
+            past_experiences=agent_experiences,
+            iteration_number=iteration_number,
+            current_configuration=current_configuration,
+            best_configuration=best_configuration,
+            evaluated_configurations=evaluated_configuration_history,
+        )
+        agent_iterations += 1
+        if not isinstance(recommendation, dict):
+            raise TypeError("Random forest agent must return a JSON object.")
+        reasoning = recommendation.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ValueError(
+                "Random forest agent must return a non-empty reasoning string."
+            )
+        returned_parameters = set(recommendation) - {"reasoning"}
+        missing_parameters = set(TUNING_PARAMETERS) - returned_parameters
+        unsupported_fields = set(recommendation) - set(TUNING_PARAMETERS) - {
+            "reasoning"
+        }
+        if missing_parameters:
+            raise ValueError(
+                "Random forest agent must return all tuning parameters: {}".format(
+                    sorted(missing_parameters)
+                )
+            )
+        if unsupported_fields:
+            raise ValueError(
+                "Random forest agent returned unsupported fields: {}".format(
+                    sorted(unsupported_fields)
+                )
+            )
         print(
-            "Model optimization agent returned "
-            "(iteration {}):".format(optimization_iteration + 1)
+            "Random forest iteration {} recommendation: {}".format(
+                iteration_number,
+                json.dumps(recommendation, allow_nan=False),
+            )
         )
-        print(model_recommendation)
-        if not model_recommendation:
-            break
-
-        model_type = MODEL_TYPES[model_recommendation["model"]]
-        if not encodings_applied:
-            df = apply_deferred_encodings(
-                df,
-                deferred_encoding_operations,
-                PREPROCESSING_FUNCTIONS,
-            )
+        candidate_configuration = {
+            name: recommendation[name] for name in TUNING_PARAMETERS
+        }
+        try:
+            validate_model_params(candidate_configuration)
+        except ValueError as exc:
+            raise ValueError(
+                "Random forest agent returned an invalid configuration: {}".format(
+                    exc
+                )
+            ) from exc
+        candidate_key = tuple(
+            candidate_configuration[name] for name in TUNING_PARAMETERS
+        )
+        if candidate_key in evaluated_configurations:
+            duplicate_experience = {
+                "iteration_number": iteration_number,
+                "status": "skipped_duplicate",
+                "parameters": candidate_configuration,
+                "reasoning": reasoning,
+                "reason": (
+                    "This configuration was already evaluated; no model "
+                    "run was performed."
+                ),
+            }
+            past_experiences.append(duplicate_experience)
+            agent_experiences.append(duplicate_experience)
             print(
-                "Standard scaling will be fit on each training partition "
-                "and then applied to its validation or holdout data."
-            )
-            encodings_applied = True
-            folds_file = (
-                Path(__file__).resolve().parent
-                / "linear_regression"
-                / "folds_{}.json".format(_data_fingerprint(df))
-            )
-
-        if optimization_iteration == 0 and model_type in {
-            "ridge",
-            "lasso",
-            "elastic_net",
-        }:
-            experiment_recommendations = []
-            for alpha in INITIAL_ALPHA_VALUES:
-                initial_recommendation = {
-                    **model_recommendation,
-                    "hyperparameters": {
-                        **model_recommendation["hyperparameters"],
-                        "alpha": alpha,
-                    },
-                }
-                experiment_recommendations.append(initial_recommendation)
-        else:
-            experiment_recommendations = [model_recommendation]
-
-        for experiment_recommendation in experiment_recommendations:
-            hyperparameters = experiment_recommendation["hyperparameters"]
-            alpha = float(hyperparameters["alpha"])
-            if model_type == "elastic_net":
-                model_result = create_folds_and_train(
-                    df,
-                    target_column=target,
-                    model_type=model_type,
-                    alpha=alpha,
-                    l1_ratio=float(hyperparameters["l1_ratio"]),
-                    folds_file=folds_file,
-                )
-                alpha_histories["elastic_net_combinations_used"].append(
-                    {
-                        "alpha": alpha,
-                        "l1_ratio": float(hyperparameters["l1_ratio"]),
-                    }
-                )
-                alpha_histories["elastic_net_alphas_used"].append(alpha)
-            else:
-                model_result = create_folds_and_train(
-                    df,
-                    target_column=target,
-                    model_type=model_type,
-                    alpha=alpha,
-                    folds_file=folds_file,
-                )
-                alpha_histories["{}_alphas_used".format(model_type)].append(
-                    alpha
-                )
-            model_report = json.loads(
-                split_result_to_json(
-                    model_result,
-                    target_column=target,
+                "Random forest iteration {} skipped: duplicate configuration.".format(
+                    iteration_number
                 )
             )
             model_reports.append(model_report)
@@ -401,28 +502,61 @@ def _run_greedy_feature_selection(
 
     def evaluate_features(features: list[str]) -> dict[str, Any]:
         model_result = create_folds_and_train(
+            continue
+        candidate_result = run_random_forest_workflow(
             data,
-            target_column=target,
-            model_type=model_type,
-            alpha=alpha,
-            l1_ratio=l1_ratio,
-            features=features,
-            folds_file=folds_file,
+            target,
+            search_space={
+                name: [candidate_configuration[name]]
+                for name in TUNING_PARAMETERS
+            },
+            n_iter=1,
         )
-        report = json.loads(
-            split_result_to_json(
-                model_result,
-                target_column=target,
+        candidate_search = candidate_result["cross_validation"]["results"]
+        if len(candidate_search) != 1:
+            raise RuntimeError(
+                "A random-forest agent recommendation did not evaluate exactly one configuration."
+            )
+        evaluated_result = candidate_search[0]
+        if evaluated_result["configuration"] != candidate_configuration:
+            raise RuntimeError(
+                "Random-forest evaluation did not use the agent-recommended configuration."
+            )
+        evaluated_configurations.add(candidate_key)
+        evaluated_configuration_history.append(
+            dict(candidate_configuration)
+        )
+        print(
+            "Random forest iteration {} result: parameters={}, CV mean R2={}".format(
+                iteration_number,
+                json.dumps(candidate_configuration, allow_nan=False),
+                evaluated_result["mean_std"]["r2"]["mean"],
             )
         )
-        return report["training"]["cross_validation"]
+        evaluated_experience = _rf_experience(
+            iteration_number, evaluated_result, reasoning
+        )
+        past_experiences.append(evaluated_experience)
+        agent_experiences.append(evaluated_experience)
 
-    selection = greedy_coefficient_feature_selection(
-        training["coefficients"],
-        evaluate_features,
-    )
-    return selection
+        current_configuration = dict(candidate_configuration)
+        candidate_performance = _rf_performance_key(
+            evaluated_result["mean_std"]
+        )
+        if (
+            candidate_performance is not None
+            and candidate_performance > best_performance
+        ):
+            best_configuration = dict(candidate_configuration)
+            best_result = candidate_result
+            best_performance = candidate_performance
 
+    return {
+        **best_result,
+        "past_experiences": past_experiences,
+        "agent_iterations": agent_iterations,
+        "best_cv_r2": best_performance[0],
+    }
 
 def main():
     #read the files
@@ -492,6 +626,7 @@ def main():
             )
         return _select_best_classification_report(model_reports)
 
+    print(statistics)
     regression_recommendation = linear_regression_agent(
         dataset_description=dataset_description,
         target_column=target,
@@ -503,7 +638,54 @@ def main():
     print(regression_recommendation)
 
     ranked_models = regression_recommendation["ranked_models"]
-    if ranked_models:
+    top_model = next(
+        (model for model in ranked_models if model.get("rank") == 1),
+        None,
+    )
+    if top_model and top_model.get("model_name") == "KNeighborsRegressor":
+        knn_data = apply_deferred_encodings(
+            df,
+            deferred_encoding_operations,
+            PREPROCESSING_FUNCTIONS,
+        )
+        knn_result = run_knn_workflow(
+            knn_data,
+            target,
+            interactive=False,
+        )
+        knn_summary = {
+            "selected_features": knn_result["selected_features"],
+            "hyperparameters": knn_result["hyperparameters"],
+            "cross_validation": knn_result["cross_validation"],
+            "holdout_metrics": knn_result["holdout_metrics"],
+        }
+        print("KNN regression results:")
+        print(json.dumps(knn_summary, indent=2, allow_nan=False))
+        return knn_result
+    elif top_model and top_model.get("model_name") == "RandomForestRegressor":
+        random_forest_data = apply_deferred_encodings(
+            df,
+            deferred_encoding_operations,
+            PREPROCESSING_FUNCTIONS,
+        )
+        random_forest_result = _run_random_forest_optimization(
+            random_forest_data,
+            target,
+            {
+                "dataset_description": dataset_description,
+                "model_statistics": statistics,
+                "target_column": target,
+            },
+        )
+        random_forest_summary = {
+            "model": "RandomForestRegressor",
+            "parameters": random_forest_result["best_configuration"],
+            "cv_mean_r2": random_forest_result["best_cv_r2"],
+        }
+        print("Best random forest model:")
+        print(json.dumps(random_forest_summary, indent=2, allow_nan=False))
+        return random_forest_result
+    elif top_model and top_model.get("model_name") == "LinearRegressions": #must be a typo, should be "LinearRegression"
         current_model_report = {
             "target_column": target,
             "dataset_description": dataset_description,
