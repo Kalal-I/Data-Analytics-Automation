@@ -1,4 +1,5 @@
 import copy
+import json
 
 import pandas as pd
 import pytest
@@ -15,6 +16,13 @@ BASE_CONFIGURATION = {
     "max_features": 1.0,
     "max_leaf_nodes": None,
 }
+
+
+def _agent_response(**changes):
+    return {
+        "reasoning": "This is a distinct configuration to compare on CV.",
+        **{**BASE_CONFIGURATION, **changes},
+    }
 
 
 def _cv_result(configuration, r2):
@@ -87,11 +95,11 @@ def test_random_forest_optimization_runs_baseline_and_five_agent_experiments(
         return _workflow_result(configuration, [result])
 
     recommendations = [
-        {"max_depth": 5},
-        {"min_samples_leaf": 2},
-        {"max_features": "sqrt"},
-        {"n_estimators": 150},
-        {"max_leaf_nodes": 20},
+        _agent_response(max_depth=5),
+        _agent_response(min_samples_leaf=2),
+        _agent_response(max_features="sqrt"),
+        _agent_response(n_estimators=150),
+        _agent_response(max_leaf_nodes=20),
     ]
     agent_calls = []
 
@@ -126,16 +134,31 @@ def test_random_forest_optimization_runs_baseline_and_five_agent_experiments(
         5,
         6,
     ]
+    assert "tuning_report" in agent_calls[0]["past_experiences"][0]
+    assert len(
+        agent_calls[0]["past_experiences"][0]["tuning_report"][
+            "top_configurations"
+        ]
+    ) == 2
     assert all(
         call["dataset_statistics"] == {"target_column": "target"}
         for call in agent_calls
     )
+    assert BASE_CONFIGURATION in agent_calls[1]["evaluated_configurations"]
+    assert {
+        key: value
+        for key, value in _agent_response(max_depth=5).items()
+        if key != "reasoning"
+    } in agent_calls[1]["evaluated_configurations"]
     assert agent_calls[1]["current_configuration"]["max_depth"] == 5
     assert agent_calls[1]["best_configuration"] == BASE_CONFIGURATION
     assert len(result["past_experiences"]) == 7
     assert result["agent_iterations"] == 5
     assert result["best_configuration"]["max_leaf_nodes"] == 20
     assert result["best_cv_r2"] == pytest.approx(0.86)
+    assert result["past_experiences"][-1]["reasoning"] == (
+        "This is a distinct configuration to compare on CV."
+    )
     output = capsys.readouterr().out
     assert output.count("Random forest iteration ") == 10
     assert output.count(" recommendation: ") == 5
@@ -143,6 +166,102 @@ def test_random_forest_optimization_runs_baseline_and_five_agent_experiments(
     assert output.count("CV mean R2=") == 5
     assert "rmse" not in output
     assert "mae" not in output
+
+
+def test_random_forest_optimization_includes_default_configuration(monkeypatch):
+    sampled_configuration = {**BASE_CONFIGURATION, "n_estimators": 50}
+    workflow_calls = []
+    recommendations = [
+        _agent_response(max_depth=5),
+        _agent_response(min_samples_leaf=2),
+        _agent_response(max_features="sqrt"),
+        _agent_response(n_estimators=150),
+        _agent_response(max_leaf_nodes=20),
+    ]
+
+    def fake_workflow(_data, _target, **kwargs):
+        _ = (_data, _target)
+        workflow_calls.append(kwargs)
+        if not kwargs:
+            return _workflow_result(
+                sampled_configuration,
+                [_cv_result(sampled_configuration, 0.8)],
+            )
+
+        configuration = {
+            name: values[0] for name, values in kwargs["search_space"].items()
+        }
+        configuration = {**BASE_CONFIGURATION, **configuration}
+        score = 0.99 if configuration == BASE_CONFIGURATION else 0.7
+        result = _workflow_result(
+            configuration,
+            [_cv_result(configuration, score)],
+        )
+        if configuration == BASE_CONFIGURATION:
+            result["model"] = "default-model"
+        return result
+
+    agent_calls = []
+
+    def fake_agent(**kwargs):
+        agent_calls.append(kwargs)
+        return recommendations[len(agent_calls) - 1]
+
+    monkeypatch.setattr(pipeline, "run_random_forest_workflow", fake_workflow)
+    monkeypatch.setattr(pipeline, "rfr_agent", fake_agent)
+
+    result = pipeline._run_random_forest_optimization(
+        pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
+        "target",
+        {},
+    )
+
+    assert workflow_calls[1] == {
+        "search_space": {
+            name: [BASE_CONFIGURATION[name]] for name in BASE_CONFIGURATION
+        },
+        "n_iter": 1,
+    }
+    assert result["best_configuration"] == BASE_CONFIGURATION
+    assert result["best_cv_r2"] == pytest.approx(0.99)
+    assert result["model"] == "default-model"
+    assert agent_calls[0]["best_configuration"] == BASE_CONFIGURATION
+    assert agent_calls[0]["past_experiences"][1]["parameters"] == BASE_CONFIGURATION
+
+
+def test_random_forest_agent_configuration_can_exceed_initial_search_grid(
+    monkeypatch,
+):
+    proposed = _agent_response(n_estimators=250)
+    workflow_calls = []
+
+    def fake_workflow(_data, _target, **kwargs):
+        _ = (_data, _target)
+        workflow_calls.append(kwargs)
+        if not kwargs:
+            return _workflow_result(
+                BASE_CONFIGURATION,
+                [_cv_result(BASE_CONFIGURATION, 0.8)],
+            )
+        configuration = {
+            name: values[0] for name, values in kwargs["search_space"].items()
+        }
+        return _workflow_result(
+            configuration,
+            [_cv_result(configuration, 0.9)],
+        )
+
+    monkeypatch.setattr(pipeline, "run_random_forest_workflow", fake_workflow)
+    monkeypatch.setattr(pipeline, "rfr_agent", lambda **_kwargs: proposed)
+
+    result = pipeline._run_random_forest_optimization(
+        pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
+        "target",
+        {},
+    )
+
+    assert workflow_calls[1]["search_space"]["n_estimators"] == [250]
+    assert result["best_configuration"]["n_estimators"] == 250
 
 
 def test_random_forest_optimization_rejects_missing_iteration_recommendation(
@@ -164,7 +283,7 @@ def test_random_forest_optimization_rejects_missing_iteration_recommendation(
     monkeypatch.setattr(pipeline, "run_random_forest_workflow", fake_workflow)
     monkeypatch.setattr(pipeline, "rfr_agent", fake_agent)
 
-    with pytest.raises(ValueError, match="all five iterations"):
+    with pytest.raises(ValueError, match="reasoning"):
         pipeline._run_random_forest_optimization(
             pd.DataFrame({"feature": [1, 2], "target": [2, 4]}),
             "target",
@@ -195,11 +314,11 @@ def test_random_forest_optimization_skips_duplicate_and_continues_iterations(
         return _workflow_result(configuration, [result])
 
     recommendations = [
-        {"max_depth": 5},
-        {"max_depth": 5},
-        {"min_samples_leaf": 2},
-        {"max_features": "sqrt"},
-        {"n_estimators": 150},
+        _agent_response(max_depth=5),
+        _agent_response(max_depth=5),
+        _agent_response(max_depth=5, min_samples_leaf=2),
+        _agent_response(max_depth=5, max_features="sqrt"),
+        _agent_response(max_depth=5, n_estimators=150),
     ]
 
     def fake_agent(**kwargs):
@@ -222,6 +341,13 @@ def test_random_forest_optimization_skips_duplicate_and_continues_iterations(
     assert skipped["iteration_number"] == 2
     assert skipped["status"] == "skipped_duplicate"
     assert skipped["parameters"]["max_depth"] == 5
+    evaluated_history = agent_calls[2]["evaluated_configurations"]
+    first_proposal = {
+        key: value
+        for key, value in _agent_response(max_depth=5).items()
+        if key != "reasoning"
+    }
+    assert evaluated_history.count(first_proposal) == 1
     assert len(result["past_experiences"]) == 6
     output = capsys.readouterr().out
     assert "Random forest iteration 2 skipped: duplicate configuration." in output
@@ -237,7 +363,11 @@ def test_rfr_agent_sends_context_and_validates_json_response(monkeypatch):
             return None
 
         def json(self):
-            return {"response": '{"max_depth": 10}'}
+            return {
+                "response": json.dumps(
+                    _agent_response(n_estimators=250, max_depth=10)
+                )
+            }
 
     def fake_post(url, **kwargs):
         request["url"] = url
@@ -255,6 +385,7 @@ def test_rfr_agent_sends_context_and_validates_json_response(monkeypatch):
         iteration_number=2,
         current_configuration=BASE_CONFIGURATION,
         best_configuration=BASE_CONFIGURATION,
+        evaluated_configurations=[BASE_CONFIGURATION],
     )
 
     body = request["json"]["prompt"]
@@ -265,17 +396,28 @@ def test_rfr_agent_sends_context_and_validates_json_response(monkeypatch):
     assert "### Current iteration\n\n2" in body
     assert '"n_estimators": 100' in body
     assert '"parameters":' in body
+    assert "### Evaluated configurations (authoritative duplicate-check list)" in body
+    assert '"n_estimators": 100' in body.split(
+        "### Evaluated configurations (authoritative duplicate-check list)"
+    )[1]
+    assert "Compare all six parameter values exactly" in body
     assert "NEVER recommend a complete configuration" in rfr_module.prompt
-    assert "A duplicate recommendation will be skipped" in rfr_module.prompt
-    assert recommendation == {"max_depth": 10}
+    assert "Python will skip duplicates" in rfr_module.prompt
+    assert "all six tuning parameters" in rfr_module.prompt
+    assert "concise `reasoning` string" in rfr_module.prompt
+    assert "not restricted to the initial randomized search grid" in body
+    assert recommendation == _agent_response(n_estimators=250, max_depth=10)
 
 
 @pytest.mark.parametrize(
     "response",
     [
         '{"criterion": "squared_error"}',
-        '{"max_depth": 7}',
-        '{"max_depth": true}',
+        '{"reasoning": "incomplete", "max_depth": 7}',
+        '{"reasoning": "", "n_estimators": 100, "max_depth": null, "min_samples_split": 2, "min_samples_leaf": 1, "max_features": 1.0, "max_leaf_nodes": null}',
+        '{"reasoning": "invalid value", "n_estimators": 0, "max_depth": 7, "min_samples_split": 2, "min_samples_leaf": 1, "max_features": 1.0, "max_leaf_nodes": null}',
+        '{"reasoning": "invalid type", "n_estimators": true, "max_depth": null, "min_samples_split": 2, "min_samples_leaf": 1, "max_features": 1.0, "max_leaf_nodes": null}',
+        '{"reasoning": "extra field", "n_estimators": 100, "max_depth": null, "min_samples_split": 2, "min_samples_leaf": 1, "max_features": 1.0, "max_leaf_nodes": null, "extra": 1}',
         "not json",
     ],
 )

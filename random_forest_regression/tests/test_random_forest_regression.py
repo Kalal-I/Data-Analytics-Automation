@@ -102,7 +102,40 @@ def test_workflow_output_and_programmatic_invocation():
         sample_data(), "y", features=["x1", "x2", "x3"],
         search_space=small_search(), n_iter=4, random_state=42,
     )
-    assert set(result) == {"model", "selected_features", "best_configuration", "cross_validation", "holdout_metrics", "folds"}
+    assert set(result) == {
+        "model",
+        "selected_features",
+        "best_configuration",
+        "cross_validation",
+        "tuning_report",
+        "holdout_metrics",
+        "folds",
+    }
     assert result["selected_features"] == ["x1", "x2", "x3"]
     assert set(result["holdout_metrics"]) == {"r2", "mae", "rmse"}
     assert len(result["folds"]) == 5
+    assert result["tuning_report"]["total_configurations_evaluated"] == len(
+        result["cross_validation"]["results"]
+    )
+    assert len(result["tuning_report"]["top_configurations"]) <= 10
+
+
+def test_workflow_accepts_valid_configuration_outside_default_search_space():
+    configuration = {
+        "n_estimators": 250,
+        "max_depth": None,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_features": 1.0,
+        "max_leaf_nodes": None,
+    }
+    result = run_random_forest_workflow(
+        sample_data(),
+        "y",
+        features=["x1", "x2", "x3"],
+        search_space={name: [value] for name, value in configuration.items()},
+        n_iter=1,
+    )
+
+    assert result["best_configuration"] == configuration
+    assert result["model"].n_estimators == 250

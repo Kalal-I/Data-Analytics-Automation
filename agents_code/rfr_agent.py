@@ -6,7 +6,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from random_forest_regression.optimization import DEFAULT_SEARCH_SPACE
+from random_forest_regression.optimization import TUNING_PARAMETERS
+from random_forest_regression.random_forest_model import validate_model_params
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 API_URL = os.environ.get("API_URL")
@@ -23,7 +24,8 @@ You will receive:
 - Dataset statistics as JSON.
 - Current hyperparameter configuration as JSON.
 - Current iteration number (1–5).
-- Complete past experiences as JSON, including parameters and cross-validation metrics.
+- A compact tuning report with the initial search summary and top configurations,
+  plus all agent-guided experiences completed so far.
 - Best-performing configuration so far as JSON.
 
 Your responsibility is to analyze the available evidence and recommend the next configuration.
@@ -46,18 +48,27 @@ Do not optimize training performance at the expense of validation performance.
 
 ## 3. Available Parameters
 
-You may modify ONLY these six parameters.
+You must return a complete configuration containing all six tuning parameters.
+You may change any of their values, but every parameter must be present in
+every response.
 
-### Search Space
+### Tunable Parameters
 
-- `n_estimators`: [50, 100, 150, 200]
-- `max_depth`: [None, 5, 10, 20]
-- `min_samples_split`: [2, 5, 10]
-- `min_samples_leaf`: [1, 2, 4]
-- `max_features`: ["sqrt", "log2", 0.5, 0.8, 1.0]
-- `max_leaf_nodes`: [None, 20, 50, 100]
+n_estimators, max_depth, min_samples_split, min_samples_leaf, max_features, max_leaf_nodes
+These are the 6 parameters you may tune.
+Agent proposals are not restricted to the initial randomized search grid.
+Choose any values satisfying these RandomForestRegressor requirements:
 
-Every selected value must exactly match one of the available options.
+- `n_estimators`: positive integer.
+- `max_depth`: positive integer or `null`.
+- `min_samples_split`: integer >= 2 or float in (0, 1].
+- `min_samples_leaf`: positive integer or float in (0, 0.5].
+- `max_features`: `"sqrt"`, `"log2"`, `null`, positive integer, or float in (0, 1].
+- `max_leaf_nodes`: integer >= 2 or `null`.
+
+Do not use booleans, non-finite numbers, or values outside those requirements.
+The finite grid applies only to the initial randomized search; valid agent
+proposals outside that grid will be evaluated.
 
 ### Fixed Parameters
 
@@ -67,7 +78,8 @@ The following parameters must NEVER be modified:
 - `random_state`: 42
 - `n_jobs`: -1
 
-If a parameter is not returned by you, Python will retain its current value or use the default configuration.
+The response must include only the six tuning parameters and a concise
+`reasoning` string. Do not include fixed parameters.
 
 ## 4. Understanding the Hyperparameters
 
@@ -117,65 +129,41 @@ Limits the maximum number of leaf nodes in each tree.
 
 ## 5. Optimization Strategy
 
-You must make FIVE agent-guided recommendations after the initial default
-search has been evaluated. Each recommendation is evaluated by Python before
-the next iteration. Iteration 5 is a final opportunity to recommend an
-unevaluated configuration.
+Analyze the supplied dataset statistics, tuning report, current and best
+configurations, past experiments, and evaluated-configuration list together.
+For each request, recommend one valid, unevaluated configuration that is a
+reasonable next experiment. Choose which parameters to adjust based on the
+available evidence; there is no required parameter order or iteration-specific
+tuning stage.
 
-Use the following stages as guidance. They are not rigid rules. You may revisit any parameter when the evaluation evidence justifies doing so.
-
-### Iteration 1 – Initial Configuration
-
-- Analyze the dataset characteristics.
-- Select a reasonable starting configuration.
-- Use the supplied defaults as a baseline.
-- Avoid making unnecessary changes.
-- Consider the number of features and samples when choosing `max_features` and tree complexity.
-
-### Iteration 2 – Tree Complexity
-
-Analyze training and cross-validation performance.
-
-- If training performance is substantially higher than validation performance, investigate overfitting.
-- Consider increasing `min_samples_leaf` or `min_samples_split`.
-- Consider restricting `max_depth` or `max_leaf_nodes`.
-- If both training and validation performance are poor, investigate possible underfitting.
-
-### Iteration 3 – Feature Selection
-
-Investigate `max_features`.
-
-- Consider whether restricting the number of features improves generalization.
-- Use dataset dimensionality and previous evaluation results.
-- Do not assume `"sqrt"` or `"log2"` is automatically better than larger fractions.
-- Preserve other strong parameter choices unless there is a reason to change them.
-
-### Iteration 4 – Forest Refinement
-
-Investigate forest size and remaining complexity parameters.
-
-- Consider increasing `n_estimators` if performance or stability suggests insufficient forest size.
-- Avoid increasing tree count without a reasonable justification.
-- Revisit `max_leaf_nodes` and other complexity parameters if needed.
-
-### Iteration 5 – Final Refinement
-
-- Analyze the complete experiment history.
-- Make a small, evidence-based adjustment if worthwhile.
-- Prefer configurations close to the best-performing configuration when previous experiments show stable performance.
-- Recommend a distinct, unevaluated configuration even if recent experiments
-  have not improved the best result. Do not claim that it will improve.
+Prioritize cross-validation generalization and consistency. Consider possible
+overfitting or underfitting, feature dimensionality, model complexity,
+interactions among parameters, and computational cost when relevant to the
+evidence. Preserve strong settings when there is no reason to change them.
+Recommendations need not improve the best score, and reasoning must not
+present an untested configuration as an established improvement.
 
 ## 6. Decision-Making Rules
 
-1. Always consider the complete history of previous experiments.
+1. Use the tuning summary, ranked configurations, and all supplied
+   agent-guided experiments. The initial report intentionally summarizes
+   rather than lists every baseline trial; the separate evaluated
+   configurations list is authoritative for duplicate checking.
 2. NEVER recommend a complete configuration that has already been evaluated.
-   Compare the merged configuration (current configuration plus your proposed
-   changes) against every parameter configuration in past experiences, not just
-   against the last proposal. A duplicate recommendation will be skipped.
-   Choose a different, unevaluated configuration for this iteration.
-3. Change only parameters for which there is a reasonable justification.
-4. Do not modify all six parameters in every iteration.
+   The complete, authoritative list is provided under "Evaluated
+   configurations". Before returning JSON, construct the six-value
+   configuration you plan to recommend and compare it against EVERY entry in
+   that list. Compare all six parameter values exactly, treating `null` as
+   Python `None` and numeric values such as `1` and `1.0` as equivalent. If it
+   matches even one entry, change at least one parameter to another valid value
+   and check again. Repeat this self-check until the full configuration is
+   absent from the list. Do not rely only on memory, the top-10 report, or
+   agent-guided history. Python will skip duplicates, so returning one wastes
+   an iteration.
+3. Make targeted changes only when there is a reasonable justification, but
+   include the complete six-parameter configuration in every response.
+4. Copy values from the current or best configuration for parameters you do not
+   intend to change.
 5. Do not assume increasing `n_estimators` always improves performance.
 6. Do not assume deeper trees always improve performance.
 7. Do not assume more restrictive trees always improve generalization.
@@ -184,15 +172,18 @@ Investigate forest size and remaining complexity parameters.
 10. Never replace a better configuration with a worse one. Python maintains the best-performing configuration separately.
 11. If evaluation metrics conflict, prioritize cross-validation generalization rather than training performance.
 12. Do not claim an improvement unless it is supported by the supplied evaluation results.
-13. Treat the current configuration as the starting point. Python merges your
-    returned parameter changes into it and retains the best-performing
-    configuration separately.
+13. Treat parameter-performance observations as descriptive, not causal:
+    configurations may differ in multiple parameters.
+14. Treat the current configuration as the starting point. Return your full
+    proposed configuration; Python evaluates it and retains the
+    best-performing configuration separately.
 
-## 7. Required Iterations
+## 7. Recommendation Requirements
 
-Return one non-empty parameter update for each requested iteration. Do not
-stop early or return `{}`. Never repeat an evaluated configuration. If there
-is no evidence that a new configuration will improve performance, choose a
+For each request, return a complete configuration and a concise,
+evidence-based reasoning string. Do not assume a particular tuning stage based
+on the iteration number. Never repeat an evaluated configuration. If there is
+no evidence that a new configuration will improve performance, choose a
 reasonable unevaluated configuration for measurement and do not claim that it
 is an improvement.
 
@@ -218,28 +209,37 @@ is an improvement.
 
 <PAST_EXPERIENCES_JSON>
 
+### Evaluated configurations (authoritative duplicate-check list)
+
+<EVALUATED_CONFIGURATIONS_JSON>
+
 ## 9. Output Format
 
-Return ONLY a valid JSON object containing the parameters you want to change.
-The object must not be empty.
+Return ONLY a valid JSON object containing a concise `reasoning` string and
+all six tuning parameters. Each parameter value must be selected from its
+valid domain above.
 
 Example:
 
 {
-    "max_depth": 10,
-    "min_samples_leaf": 2,
-    "max_features": 0.8
+    "reasoning": "The top CV results favor less restrictive trees, so retain the current complexity settings and test 150 trees with the same feature sampling.",
+    "n_estimators": 150,
+    "max_depth": null,
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "max_features": 1.0,
+    "max_leaf_nodes": null
 }
 
 ### Strict Output Rules
 
-- Do not return unchanged parameters.
+- Include every one of the six permitted tuning parameters.
+- Include a non-empty `reasoning` string grounded in supplied evidence.
 - Do not return fixed parameters (`criterion`, `random_state`, `n_jobs`).
-- Do not return parameters outside the six permitted tuning parameters.
-- Every value must belong to its corresponding search space.
-- Do not include explanations outside the JSON.
+- Do not return any other fields.
+- Every value must satisfy its parameter's type and estimator requirements.
+- Keep reasoning concise and do not claim unsupported causal effects.
 - Do not use Markdown code fences.
-- Do not return the complete configuration unless all six parameters genuinely need modification.
 - Return valid JSON only.'''
 
 
@@ -266,25 +266,33 @@ def _clean_json_output(raw_output):
 
 
 def _validate_recommendation(recommendation):
-    if not recommendation:
+    if "reasoning" not in recommendation:
+        raise ValueError("Random forest agent response must include reasoning")
+    reasoning = recommendation["reasoning"]
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise ValueError("Random forest agent reasoning must be a non-empty string")
+
+    parameters = set(TUNING_PARAMETERS)
+    returned_parameters = set(recommendation) - {"reasoning"}
+    missing = parameters - returned_parameters
+    if missing:
         raise ValueError(
-            "Random forest agent must recommend a configuration for each iteration"
+            "Random forest agent must return all tuning parameters: {}".format(
+                sorted(missing)
+            )
         )
-    unknown = set(recommendation) - set(DEFAULT_SEARCH_SPACE)
+    unknown = set(recommendation) - parameters - {"reasoning"}
     if unknown:
         raise ValueError(
-            "Random forest agent returned unsupported parameters: {}".format(
+            "Random forest agent returned unsupported fields: {}".format(
                 sorted(unknown)
             )
         )
 
-    for name, value in recommendation.items():
-        if isinstance(value, bool) or value not in DEFAULT_SEARCH_SPACE[name]:
-            raise ValueError(
-                "Random forest agent returned an invalid value for {!r}: {!r}".format(
-                    name, value
-                )
-            )
+    configuration = {
+        name: recommendation[name] for name in TUNING_PARAMETERS
+    }
+    validate_model_params(configuration)
 
     return recommendation
 
@@ -295,8 +303,9 @@ def rfr_agent(
     iteration_number,
     current_configuration,
     best_configuration,
+    evaluated_configurations=None,
 ):
-    """Request the next bounded RandomForestRegressor parameter update."""
+    """Request a reasoned, complete RandomForestRegressor configuration."""
     if not API_URL or not API_TOKEN:
         raise ValueError("API_URL and API_TOKEN must be set in the project .env file")
     if (
@@ -319,6 +328,9 @@ def rfr_agent(
         ),
         "<PAST_EXPERIENCES_JSON>": json.dumps(
             past_experiences, ensure_ascii=False
+        ),
+        "<EVALUATED_CONFIGURATIONS_JSON>": json.dumps(
+            evaluated_configurations or [], ensure_ascii=False
         ),
     }
     request_prompt = prompt

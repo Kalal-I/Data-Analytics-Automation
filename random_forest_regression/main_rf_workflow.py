@@ -6,6 +6,7 @@ from .folds import create_cv_folds
 from .feature_selection import validate_features
 from .optimization import optimize_hyperparameters, evaluate_holdout
 from .random_forest_model import fit_random_forest_model
+from .tuning_report import build_tuning_report
 
 
 def run_random_forest_workflow(data: pd.DataFrame, target: str,
@@ -41,6 +42,7 @@ def run_random_forest_workflow(data: pd.DataFrame, target: str,
         "selected_features": selected_features,
         "best_configuration": tuning["best_configuration"],
         "cross_validation": tuning,
+        "tuning_report": build_tuning_report(tuning),
         "holdout_metrics": evaluate_holdout(model, X_holdout, y_holdout),
         "folds": folds,
     }

@@ -26,12 +26,16 @@ from random_forest_regression.main_rf_workflow import (
     run_random_forest_workflow,
 )
 from random_forest_regression.optimization import (
-    DEFAULT_SEARCH_SPACE,
     TUNING_PARAMETERS,
 )
+from random_forest_regression.random_forest_model import (
+    DEFAULTS as RF_DEFAULTS,
+    validate_model_params,
+)
+from random_forest_regression.tuning_report import build_tuning_report
 
 
-def _rf_experience(iteration_number, result):
+def _rf_experience(iteration_number, result, reasoning=None):
     experience = {
         "iteration_number": iteration_number,
         "status": (
@@ -44,6 +48,8 @@ def _rf_experience(iteration_number, result):
     }
     if result.get("failures"):
         experience["failures"] = result["failures"]
+    if reasoning is not None:
+        experience["reasoning"] = reasoning
     return experience
 
 
@@ -64,7 +70,30 @@ def _run_random_forest_optimization(data, target, dataset_statistics):
     past_experiences = [
         _rf_experience(0, result) for result in baseline_search
     ]
+    tuning_report = baseline_result.get("tuning_report")
+    if tuning_report is None:
+        tuning_report = build_tuning_report(
+            baseline_result["cross_validation"]
+        )
+    agent_experiences = [
+        {
+            "iteration_number": 0,
+            "status": "tuning_summary",
+            "tuning_report": tuning_report,
+        }
+    ]
 
+    default_configuration = {
+        name: RF_DEFAULTS[name] for name in TUNING_PARAMETERS
+    }
+    default_search_result = next(
+        (
+            result
+            for result in baseline_search
+            if result["configuration"] == default_configuration
+        ),
+        None,
+    )
     best_configuration = dict(baseline_result["best_configuration"])
     best_result = baseline_result
     best_search_result = next(
@@ -85,77 +114,158 @@ def _run_random_forest_optimization(data, target, dataset_statistics):
             "The default random-forest search returned unusable cross-validation metrics."
         )
 
+    default_result = (
+        baseline_result
+        if best_configuration == default_configuration
+        else None
+    )
+    if default_search_result is None:
+        default_result = run_random_forest_workflow(
+            data,
+            target,
+            search_space={
+                name: [default_configuration[name]]
+                for name in TUNING_PARAMETERS
+            },
+            n_iter=1,
+        )
+        default_search = default_result["cross_validation"]["results"]
+        if (
+            len(default_search) != 1
+            or default_search[0]["configuration"] != default_configuration
+        ):
+            raise RuntimeError(
+                "The default random-forest configuration was not evaluated exactly once."
+            )
+        default_search_result = default_search[0]
+        past_experiences.append(_rf_experience(0, default_search_result))
+    agent_experiences.append(
+        _rf_experience(0, default_search_result)
+    )
+
+    default_performance = _rf_performance_key(
+        default_search_result["mean_std"]
+    )
+    if default_performance is None:
+        raise RuntimeError(
+            "The default random-forest configuration returned unusable cross-validation metrics."
+        )
+    if default_performance > best_performance:
+        if default_result is None:
+            default_result = run_random_forest_workflow(
+                data,
+                target,
+                search_space={
+                    name: [default_configuration[name]]
+                    for name in TUNING_PARAMETERS
+                },
+                n_iter=1,
+            )
+            default_search = default_result["cross_validation"]["results"]
+            if (
+                len(default_search) != 1
+                or default_search[0]["configuration"] != default_configuration
+            ):
+                raise RuntimeError(
+                    "The default random-forest configuration was not evaluated exactly once."
+                )
+        best_configuration = dict(default_configuration)
+        best_result = default_result
+        best_performance = default_performance
+
     current_configuration = dict(best_configuration)
     evaluated_configurations = {
         tuple(result["configuration"][name] for name in TUNING_PARAMETERS)
         for result in baseline_search
     }
+    evaluated_configuration_history = []
+    for result in baseline_search:
+        configuration = {
+            name: result["configuration"][name] for name in TUNING_PARAMETERS
+        }
+        if configuration not in evaluated_configuration_history:
+            evaluated_configuration_history.append(configuration)
+    default_key = tuple(
+        default_configuration[name] for name in TUNING_PARAMETERS
+    )
+    if default_key not in evaluated_configurations:
+        evaluated_configuration_history.append(default_configuration)
+    evaluated_configurations.add(default_key)
     agent_iterations = 0
 
     for iteration_number in range(1, 6):
         recommendation = rfr_agent(
             dataset_statistics=dataset_statistics,
-            past_experiences=past_experiences,
+            past_experiences=agent_experiences,
             iteration_number=iteration_number,
             current_configuration=current_configuration,
             best_configuration=best_configuration,
+            evaluated_configurations=evaluated_configuration_history,
         )
         agent_iterations += 1
         if not isinstance(recommendation, dict):
             raise TypeError("Random forest agent must return a JSON object.")
+        reasoning = recommendation.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ValueError(
+                "Random forest agent must return a non-empty reasoning string."
+            )
+        returned_parameters = set(recommendation) - {"reasoning"}
+        missing_parameters = set(TUNING_PARAMETERS) - returned_parameters
+        unsupported_fields = set(recommendation) - set(TUNING_PARAMETERS) - {
+            "reasoning"
+        }
+        if missing_parameters:
+            raise ValueError(
+                "Random forest agent must return all tuning parameters: {}".format(
+                    sorted(missing_parameters)
+                )
+            )
+        if unsupported_fields:
+            raise ValueError(
+                "Random forest agent returned unsupported fields: {}".format(
+                    sorted(unsupported_fields)
+                )
+            )
         print(
             "Random forest iteration {} recommendation: {}".format(
                 iteration_number,
                 json.dumps(recommendation, allow_nan=False),
             )
         )
-        if not recommendation:
-            raise ValueError(
-                "Random forest agent must return a recommendation for all five iterations."
-            )
-
-        unknown_parameters = set(recommendation) - set(DEFAULT_SEARCH_SPACE)
-        if unknown_parameters:
-            raise ValueError(
-                "Random forest agent returned unsupported parameters: {}".format(
-                    sorted(unknown_parameters)
-                )
-            )
-        for name, value in recommendation.items():
-            if isinstance(value, bool) or value not in DEFAULT_SEARCH_SPACE[name]:
-                raise ValueError(
-                    "Random forest agent returned an invalid value for {!r}: {!r}".format(
-                        name, value
-                    )
-                )
-
         candidate_configuration = {
-            **current_configuration,
-            **recommendation,
+            name: recommendation[name] for name in TUNING_PARAMETERS
         }
+        try:
+            validate_model_params(candidate_configuration)
+        except ValueError as exc:
+            raise ValueError(
+                "Random forest agent returned an invalid configuration: {}".format(
+                    exc
+                )
+            ) from exc
         candidate_key = tuple(
             candidate_configuration[name] for name in TUNING_PARAMETERS
         )
         if candidate_key in evaluated_configurations:
-            past_experiences.append(
-                {
-                    "iteration_number": iteration_number,
-                    "status": "skipped_duplicate",
-                    "parameters": candidate_configuration,
-                    "reason": (
-                        "This configuration was already evaluated; no model "
-                        "run was performed."
-                    ),
-                }
-            )
+            duplicate_experience = {
+                "iteration_number": iteration_number,
+                "status": "skipped_duplicate",
+                "parameters": candidate_configuration,
+                "reasoning": reasoning,
+                "reason": (
+                    "This configuration was already evaluated; no model "
+                    "run was performed."
+                ),
+            }
+            past_experiences.append(duplicate_experience)
+            agent_experiences.append(duplicate_experience)
             print(
                 "Random forest iteration {} skipped: duplicate configuration.".format(
                     iteration_number
                 )
             )
             continue
-        evaluated_configurations.add(candidate_key)
-
         candidate_result = run_random_forest_workflow(
             data,
             target,
@@ -175,6 +285,10 @@ def _run_random_forest_optimization(data, target, dataset_statistics):
             raise RuntimeError(
                 "Random-forest evaluation did not use the agent-recommended configuration."
             )
+        evaluated_configurations.add(candidate_key)
+        evaluated_configuration_history.append(
+            dict(candidate_configuration)
+        )
         print(
             "Random forest iteration {} result: parameters={}, CV mean R2={}".format(
                 iteration_number,
@@ -182,9 +296,11 @@ def _run_random_forest_optimization(data, target, dataset_statistics):
                 evaluated_result["mean_std"]["r2"]["mean"],
             )
         )
-        past_experiences.append(
-            _rf_experience(iteration_number, evaluated_result)
+        evaluated_experience = _rf_experience(
+            iteration_number, evaluated_result, reasoning
         )
+        past_experiences.append(evaluated_experience)
+        agent_experiences.append(evaluated_experience)
 
         current_configuration = dict(candidate_configuration)
         candidate_performance = _rf_performance_key(
