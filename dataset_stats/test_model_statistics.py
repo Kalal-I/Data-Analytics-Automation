@@ -7,8 +7,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
+from sklearn.linear_model import LinearRegression as SklearnLinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import KFold, train_test_split
 
+import dataset_stats.model_statistics as model_statistics_module
 from dataset_stats.model_statistics import generate_model_statistics
+from knn_regression.knn_model import DEFAULTS as KNN_DEFAULTS
+from random_forest_regression.random_forest_model import DEFAULTS as RF_DEFAULTS
 
 
 def _report(data, target="target", **kwargs):
@@ -35,6 +41,204 @@ def test_normal_regression_reports_expected_correlations():
     )
     assert "row_count" not in report
     assert "mean" not in report["target"]
+
+
+def test_default_random_forest_and_knn_baselines_are_in_model_statistics():
+    rows = np.arange(60, dtype=float)
+    data = pd.DataFrame(
+        {
+            "signal": rows,
+            "second_signal": rows % 7,
+            "category": ["A", "B"] * 30,
+            "target": rows * 2 + (rows % 7),
+        }
+    )
+
+    baselines = _report(data)["baseline_model_performance"]
+    linear = baselines["models"]["LinearRegression"]
+    forest = baselines["models"]["RandomForestRegressor"]
+    knn = baselines["models"]["KNeighborsRegressor"]
+
+    assert baselines["evaluation"]["method"] == "five_fold_cross_validation"
+    assert baselines["evaluation"]["outer_training_fraction"] == 0.8
+    assert baselines["evaluation"]["n_splits"] == 5
+    assert baselines["evaluation"]["random_state"] == 42
+    assert linear["status"] == "evaluated"
+    assert linear["parameters"] == SklearnLinearRegression().get_params()
+    assert linear["feature_columns"] == ["signal", "second_signal"]
+    assert set(linear["metrics"]) == {"r2", "mae", "rmse"}
+    assert all(
+        set(linear["metrics"][metric]) == {"mean", "std"}
+        for metric in ("r2", "mae", "rmse")
+    )
+    assert linear["training_row_count"] == 48
+    assert linear["cv_fold_count"] == 5
+    assert [fold["fold"] for fold in linear["fold_metrics"]] == [1, 2, 3, 4, 5]
+    assert forest["status"] == "evaluated"
+    assert forest["parameters"] == RF_DEFAULTS
+    assert forest["feature_columns"] == ["signal", "second_signal"]
+    assert set(forest["metrics"]) == {"r2", "mae", "rmse"}
+    assert all(
+        set(forest["metrics"][metric]) == {"mean", "std"}
+        for metric in ("r2", "mae", "rmse")
+    )
+    assert forest["training_row_count"] == 48
+    assert forest["cv_fold_count"] == 5
+    assert [fold["fold"] for fold in forest["fold_metrics"]] == [1, 2, 3, 4, 5]
+    assert knn["status"] == "evaluated"
+    assert knn["parameters"] == KNN_DEFAULTS
+    assert knn["preprocessing"] == ["StandardScaler"]
+    assert knn["feature_columns"] == ["signal", "second_signal"]
+    assert set(knn["metrics"]) == {"r2", "mae", "rmse"}
+    assert knn["training_row_count"] == 48
+    assert knn["cv_fold_count"] == 5
+    assert all(
+        np.isfinite(value)
+        for result in (linear, forest, knn)
+        for summary in result["metrics"].values()
+        for value in summary.values()
+    )
+
+
+def test_default_model_baselines_report_unavailable_for_too_few_rows():
+    report = _report(pd.DataFrame({"signal": [1, 2, 3], "target": [2, 4, 6]}))
+    models = report["baseline_model_performance"]["models"]
+
+    assert models["LinearRegression"]["status"] == "unavailable"
+    assert models["RandomForestRegressor"]["status"] == "unavailable"
+    assert models["KNeighborsRegressor"]["status"] == "unavailable"
+    assert models["LinearRegression"]["metrics"] is None
+    assert models["RandomForestRegressor"]["metrics"] is None
+    assert models["KNeighborsRegressor"]["metrics"] is None
+    assert models["RandomForestRegressor"]["limitation"] == (
+        "80_percent_training_split_has_fewer_than_10_rows_for_"
+        "five_fold_cross_validation"
+    )
+
+
+def test_default_model_baselines_use_linear_regression_cv_fold_assignments(
+    monkeypatch,
+):
+    rows = np.arange(60, dtype=float)
+    data = pd.DataFrame(
+        {
+            "signal": rows,
+            "second_signal": rows % 7,
+            "target": rows * 2 + (rows % 7),
+        }
+    )
+    fit_indices = {
+        "RandomForestRegressor": [],
+        "KNeighborsRegressor": [],
+    }
+
+    class RecordingModel:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def fit(self, X, y):
+            self.training_indices = list(X.index)
+            self.target_mean = float(y.mean())
+            return self
+
+        def predict(self, X):
+            fit_indices[self.model_name].append(
+                (self.training_indices, list(X.index))
+            )
+            return np.full(len(X), self.target_mean)
+
+    def fake_rf_evaluation(X, y, folds, configuration, **kwargs):
+        assert len(X) == len(y)
+        assert kwargs["fixed_params"]["random_state"] == RF_DEFAULTS["random_state"]
+        fold_metrics = []
+        for fold in folds:
+            fit_indices["RandomForestRegressor"].append(
+                (
+                    list(X.iloc[fold.train_indices].index),
+                    list(X.iloc[fold.validation_indices].index),
+                )
+            )
+            fold_metrics.append({"r2": 0.5, "mae": 1.0, "rmse": 1.5})
+        return {
+            "configuration": configuration,
+            "fold_metrics": fold_metrics,
+            "failures": [],
+            "mean_std": {
+                metric: {"mean": value, "std": 0.0}
+                for metric, value in {
+                    "r2": 0.5,
+                    "mae": 1.0,
+                    "rmse": 1.5,
+                }.items()
+            },
+        }
+
+    monkeypatch.setattr(
+        model_statistics_module,
+        "evaluate_random_forest_configuration",
+        fake_rf_evaluation,
+    )
+    monkeypatch.setattr(
+        model_statistics_module,
+        "create_knn_pipeline",
+        lambda **_: RecordingModel("KNeighborsRegressor"),
+    )
+    report = _report(data)["baseline_model_performance"]["models"]
+    outer_training_indices, _ = train_test_split(
+        np.arange(len(data)),
+        test_size=0.2,
+        random_state=42,
+    )
+    expected_folds = list(
+        KFold(n_splits=5, shuffle=True, random_state=42).split(
+            outer_training_indices
+        )
+    )
+
+    expected_indices = [
+        (
+            list(outer_training_indices[train_positions]),
+            list(outer_training_indices[validation_positions]),
+        )
+        for train_positions, validation_positions in expected_folds
+    ]
+    for model_name in ("RandomForestRegressor", "KNeighborsRegressor"):
+        assert fit_indices[model_name] == expected_indices
+        assert report[model_name]["cv_fold_count"] == 5
+
+    linear_fold_metrics = report["LinearRegression"]["fold_metrics"]
+    expected_linear_metrics = []
+    for train_positions, validation_positions in expected_folds:
+        train_indices = outer_training_indices[train_positions]
+        validation_indices = outer_training_indices[validation_positions]
+        model = SklearnLinearRegression().fit(
+            data.iloc[train_indices][["signal", "second_signal"]],
+            data.iloc[train_indices]["target"],
+        )
+        predictions = model.predict(
+            data.iloc[validation_indices][["signal", "second_signal"]]
+        )
+        truth = data.iloc[validation_indices]["target"].to_numpy(dtype=float)
+        residuals = truth - predictions
+        expected_linear_metrics.append(
+            {
+                "r2": round(float(r2_score(truth, predictions)), 12),
+                "mae": round(float(mean_absolute_error(truth, predictions)), 12),
+                "rmse": round(float(np.sqrt(np.mean(residuals**2))), 12),
+            }
+        )
+    assert linear_fold_metrics == [
+        {
+            "fold": fold_number,
+            "training_row_count": len(outer_training_indices[train_positions]),
+            "validation_row_count": len(outer_training_indices[validation_positions]),
+            **metrics,
+        }
+        for fold_number, (
+            (train_positions, validation_positions),
+            metrics,
+        ) in enumerate(zip(expected_folds, expected_linear_metrics), start=1)
+    ]
 
 
 def test_one_hot_encoded_metadata_preserves_valid_binary_statistics():

@@ -83,6 +83,14 @@ sections:
   in-sample fit and residual summaries. This is diagnostic evidence, not a
   holdout evaluation; standardized residual outliers use an absolute
   three-standard-deviation cutoff.
+- `baseline_model_performance`: default `LinearRegression`,
+  `RandomForestRegressor`, and `KNeighborsRegressor` parameters and
+  per-fold/mean/std metrics evaluated on the same seeded 80/20 outer training
+  split and shuffled five-fold CV assignments. Models use complete-case
+  numeric predictors only; KNN applies `StandardScaler`. If the outer training
+  split has fewer than 10 complete rows, no varying numeric predictor exists,
+  or the target is constant, the models are marked unavailable with a
+  limitation instead of fabricated metrics.
 - `categorical_feature_statistics`: distinct non-missing category counts,
   deterministic category frequencies and percentages, rare-category counts,
   and dataset missingness for each categorical feature. The rare-category
