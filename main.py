@@ -428,7 +428,7 @@ def main():
         print("Best random forest model:")
         print(json.dumps(random_forest_summary, indent=2, allow_nan=False))
         return random_forest_result
-    elif top_model and top_model.get("model_name") == "LinearRegressions": #must be a typo, should be "LinearRegression"
+    elif top_model and top_model.get("model_name") == "LinearRegression": #must be a typo, should be "LinearRegression"
         current_model_report = {
             "target_column": target,
             "dataset_description": dataset_description,

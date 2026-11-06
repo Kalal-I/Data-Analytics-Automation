@@ -338,10 +338,6 @@ def clean_json_output(raw_output):
     alpha = hyperparameters.get("alpha")
     if not _is_positive_finite_number(alpha):
         raise ValueError("Model output alpha must be a positive finite number.")
-    if Decimal(str(alpha)).as_tuple().exponent < -1:
-        raise ValueError(
-            "Model output alpha must have at most one decimal place."
-        )
     if model == "ElasticNet":
         l1_ratio = hyperparameters.get("l1_ratio")
         if not _is_valid_l1_ratio(l1_ratio):

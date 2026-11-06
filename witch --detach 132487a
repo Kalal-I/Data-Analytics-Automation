@@ -1,0 +1,54 @@
+[33m254daff[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mkv[m[33m, [m[1;31morigin/kv[m[33m)[m HEAD@{0}: pull origin kv: Fast-forward
+[33m35f8a1d[m[33m ([m[1;32mmain[m[33m)[m HEAD@{1}: pull origin main: Fast-forward
+[33m1d28fed[m HEAD@{2}: checkout: moving from main to kv
+[33m35f8a1d[m[33m ([m[1;32mmain[m[33m)[m HEAD@{3}: checkout: moving from kv to main
+[33m1d28fed[m HEAD@{4}: checkout: moving from main to kv
+[33m35f8a1d[m[33m ([m[1;32mmain[m[33m)[m HEAD@{5}: pull origin main: Fast-forward
+[33m1d28fed[m HEAD@{6}: checkout: moving from kv to main
+[33m1d28fed[m HEAD@{7}: checkout: moving from main to kv
+[33m1d28fed[m HEAD@{8}: checkout: moving from kv to main
+[33m1d28fed[m HEAD@{9}: pull origin main: Fast-forward
+[33m132487a[m HEAD@{10}: checkout: moving from main to kv
+[33m1d28fed[m HEAD@{11}: pull origin main: Fast-forward
+[33m4e894e6[m[33m ([m[1;32mstatus[m[33m)[m HEAD@{12}: checkout: moving from kv to main
+[33m132487a[m HEAD@{13}: checkout: moving from main to kv
+[33m4e894e6[m[33m ([m[1;32mstatus[m[33m)[m HEAD@{14}: checkout: moving from kv to main
+[33m132487a[m HEAD@{15}: commit: rfr done
+[33m2800ec8[m HEAD@{16}: pull origin main: Fast-forward
+[33mf3069eb[m HEAD@{17}: commit: random forest done
+[33m4e235af[m HEAD@{18}: commit: same
+[33m2beacd6[m HEAD@{19}: commit: till knn done, but agent does not rank it
+[33maa361a1[m HEAD@{20}: pull origin main: Merge made by the 'ort' strategy.
+[33m3b18dbe[m HEAD@{21}: commit: Everything till regression works
+[33m8a457df[m HEAD@{22}: commit: finished the hyper parameter tuning for linear regression
+[33m65b2284[m HEAD@{23}: commit: did 5 times for alpha values, but small issue where the models guesses already tested values
+[33m5cadd12[m HEAD@{24}: commit: Added scaling, need to work on strenghting the prompt to not reuse
+[33mfed8119[m HEAD@{25}: pull origin main: Fast-forward
+[33m9121393[m HEAD@{26}: commit: added more constraints in agents prompt
+[33m0b8c02d[m HEAD@{27}: pull: Fast-forward
+[33mcb33f2e[m HEAD@{28}: commit: did lasso, ridge and elastic net
+[33mb5563a5[m HEAD@{29}: checkout: moving from kv to kv
+[33mb5563a5[m HEAD@{30}: commit: shown demo
+[33m64de0d7[m HEAD@{31}: commit: added one time optimization loop
+[33m2f7d06d[m HEAD@{32}: pull: Fast-forward
+[33mae9be4a[m HEAD@{33}: checkout: moving from kv to kv
+[33mae9be4a[m HEAD@{34}: commit: optimizing agent done, have to test
+[33mbf1f223[m HEAD@{35}: pull --tags origin kv: Fast-forward
+[33mf482f85[m HEAD@{36}: checkout: moving from kv to kv
+[33mf482f85[m HEAD@{37}: commit: added linear_regression_agent
+[33me49d2b0[m HEAD@{38}: commit: Polished Linear Regression functionalities
+[33mce79aa3[m HEAD@{39}: commit: done with adding the extra 6 statistical features
+[33m954feb5[m HEAD@{40}: pull origin main: Fast-forward
+[33me2b6c4c[m HEAD@{41}: pull origin kv --rebase (finish): returning to refs/heads/kv
+[33me2b6c4c[m HEAD@{42}: pull origin kv --rebase (pick): connected with kaggle
+[33m4d00a96[m HEAD@{43}: pull origin kv --rebase (start): checkout 4d00a9632f6500756d09c147f4c88c264cec4777
+[33m9b1b5fa[m HEAD@{44}: commit: connected with kaggle
+[33mb048248[m HEAD@{45}: pull origin main: Fast-forward
+[33mf091c65[m HEAD@{46}: commit: meh
+[33mae10008[m HEAD@{47}: commit: rag building
+[33m09e9c98[m HEAD@{48}: commit: validation function finished
+[33mf6321d7[m HEAD@{49}: commit: till preprocessing automation done.
+[33m4e894e6[m[33m ([m[1;32mstatus[m[33m)[m HEAD@{50}: checkout: moving from main to kv
+[33m4e894e6[m[33m ([m[1;32mstatus[m[33m)[m HEAD@{51}: pull origin main: Fast-forward
+[33m0a3fc00[m HEAD@{52}: commit: preprocessing agent
+[33m22a4e2a[m HEAD@{53}: clone: from https://github.com/Kalal-I/Data-Analytics-Automation.git
