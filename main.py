@@ -5,6 +5,10 @@ from dataset_stats.description import generate_report
 from dataset_stats.model_statistics import generate_model_statistics
 from dataset_stats.open_file import read_csv_files
 from agents_code.linear_regression_agent import linear_regression_agent
+from agents_code.feature_optimization_linear_model import (
+    feature_optimization_linear_model_agent,
+)
+from agents_code.logistic_regression_agent import logistic_regression_agent
 from agents_code.preprocessing_agent import preprocessing_agent
 from agents_code.rfr_agent import rfr_agent
 from knn_regression.main_knn_workflow import run_knn_workflow
@@ -22,6 +26,11 @@ from preproccessing.deferred_encoding import (
     apply_deferred_encodings,
     partition_deferred_encodings,
 )
+from logistic_regression.data_split import train_holdout_split
+from logistic_regression.feature_selection import validate_features
+from logistic_regression.folds import create_cv_folds
+from logistic_regression.logistic_model import fit_model
+from logistic_regression.optimization import evaluate_configuration, evaluate_holdout
 from random_forest_regression.main_rf_workflow import (
     run_random_forest_workflow,
 )
@@ -35,6 +44,13 @@ from random_forest_regression.random_forest_model import (
 from random_forest_regression.tuning_report import build_tuning_report
 
 
+INITIAL_ALPHA_VALUES = (0.1, 0.5, 1.0, 10.0, 100.0)
+INITIAL_C_VALUES = (0.01, 0.1, 1.0, 10.0, 100.0)
+MODEL_TYPES = {
+    "Lasso": "lasso",
+    "Ridge": "ridge",
+    "ElasticNet": "elastic_net",
+}
 def _rf_experience(iteration_number, result, reasoning=None):
     experience = {
         "iteration_number": iteration_number,
@@ -265,6 +281,227 @@ def _run_random_forest_optimization(data, target, dataset_statistics):
                     iteration_number
                 )
             )
+            model_reports.append(model_report)
+            experience = _model_optimization_summary(model_report)
+            model_experiences.append(experience)
+
+        best_report, _ = select_best_feature_report(model_reports)
+        current_model_report = _model_optimization_summary(best_report)
+
+    return model_reports
+
+
+def _classification_model_optimization_summary(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    training = report["training"]
+    return {
+        "target_column": report["target_column"],
+        "model": training["model"],
+        "model_type": training["model_type"],
+        "hyperparameters": training["hyperparameters"],
+        "cross_validation": training["cross_validation"],
+        "holdout_metrics": training.get("holdout_metrics"),
+        "status": "completed",
+    }
+
+
+def _select_best_classification_report(
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not reports:
+        raise ValueError("classification reports cannot be empty")
+
+    def score(report):
+        training = report["training"]
+        cv = training["cross_validation"]["mean_std"]
+        f1 = cv.get("f1", {}).get("mean")
+        accuracy = cv.get("accuracy", {}).get("mean")
+        return (
+            -(f1 if f1 is not None else float("-inf")),
+            -(accuracy if accuracy is not None else float("-inf")),
+            training["model_type"],
+        )
+
+    return sorted(reports, key=score)[0]
+
+
+def _run_logistic_regression_optimization(
+    df,
+    target: str,
+    current_model_report: dict[str, Any],
+    deferred_encoding_operations: dict[str, Any],
+) -> list[dict[str, Any]]:
+    model_reports: list[dict[str, Any]] = []
+    model_experiences: list[dict[str, Any]] = []
+    c_histories = {
+        "ridge_C_values_used": [],
+        "lasso_C_values_used": [],
+        "elastic_net_C_values_used": [],
+        "elastic_net_combinations_used": [],
+    }
+    encodings_applied = False
+    folds = None
+    X_train = None
+    y_train = None
+    X_holdout = None
+    y_holdout = None
+
+    for optimization_iteration in range(5):
+        recommendation = logistic_regression_agent(
+            current_model_report,
+            past_experiences=model_experiences,
+            iteration_number=optimization_iteration + 1,
+            **{
+                key.lower(): value
+                for key, value in c_histories.items()
+            },
+        )
+        print(
+            "Logistic Regression optimization agent returned "
+            "(iteration {}):".format(optimization_iteration + 1)
+        )
+        print(recommendation)
+        if not recommendation:
+            break
+
+        model_type = MODEL_TYPES[recommendation["model"]]
+        if not encodings_applied:
+            df = apply_deferred_encodings(
+                df,
+                deferred_encoding_operations,
+                PREPROCESSING_FUNCTIONS,
+            )
+            encodings_applied = True
+            features = validate_features(df, target)
+            X_train_full, X_holdout, y_train, y_holdout = train_holdout_split(
+                df,
+                target,
+            )
+            X_train = X_train_full[features]
+            X_holdout = X_holdout[features]
+            folds = create_cv_folds(X_train, y_train, random_state=42)
+
+        if optimization_iteration == 0:
+            experiment_recommendations = []
+            for C_value in INITIAL_C_VALUES:
+                experiment_recommendations.append(
+                    {
+                        **recommendation,
+                        "hyperparameters": {
+                            **recommendation["hyperparameters"],
+                            "C": C_value,
+                        },
+                    }
+                )
+        else:
+            experiment_recommendations = [recommendation]
+
+        for experiment_recommendation in experiment_recommendations:
+            hyperparameters = experiment_recommendation["hyperparameters"]
+            C_value = float(hyperparameters["C"])
+            penalty = {
+                "lasso": "l1",
+                "ridge": "l2",
+                "elastic_net": "elasticnet",
+            }[model_type]
+            configuration = {"penalty": penalty, "C": C_value}
+            if model_type == "elastic_net":
+                configuration["l1_ratio"] = float(
+                    hyperparameters["l1_ratio"]
+                )
+
+            tuning = evaluate_configuration(
+                X_train,
+                y_train,
+                folds,
+                configuration,
+            )
+            final_params = {
+                **configuration,
+                "max_iter": int(hyperparameters.get("max_iter", 1000)),
+                "random_state": 42,
+            }
+            model = fit_model(X_train, y_train, **final_params)
+            holdout_metrics = evaluate_holdout(
+                model,
+                X_holdout,
+                y_holdout,
+            )
+            model_report = {
+                "schema_version": 1,
+                "target_column": target,
+                "features": list(X_train.columns),
+                "training": {
+                    "model": recommendation["model"],
+                    "model_type": model_type,
+                    "hyperparameters": {
+                        key: value
+                        for key, value in {
+                            "C": C_value,
+                            **(
+                                {
+                                    "l1_ratio": configuration["l1_ratio"]
+                                }
+                                if model_type == "elastic_net"
+                                else {}
+                            ),
+                        }.items()
+                    },
+                    "cross_validation": tuning,
+                    "holdout_metrics": holdout_metrics,
+                },
+            }
+            model_reports.append(model_report)
+            model_experiences.append(
+                _classification_model_optimization_summary(model_report)
+            )
+
+            if model_type == "elastic_net":
+                c_histories["elastic_net_combinations_used"].append(
+                    {
+                        "C": C_value,
+                        "l1_ratio": configuration["l1_ratio"],
+                    }
+                )
+                c_histories["elastic_net_C_values_used"].append(C_value)
+            else:
+                c_histories["{}_C_values_used".format(model_type)].append(
+                    C_value
+                )
+
+        best_report = _select_best_classification_report(model_reports)
+        current_model_report = _classification_model_optimization_summary(
+            best_report
+        )
+
+    return model_reports
+
+
+def _run_greedy_feature_selection(
+    data,
+    target: str,
+    best_model_report: dict[str, Any],
+    folds_file: Path,
+) -> dict[str, Any]:
+    """Evaluate coefficient-ranked feature subsets with the chosen configuration."""
+    training = best_model_report["training"]
+    model_type = training["model_type"]
+    if model_type not in {"lasso", "ridge", "elastic_net"}:
+        raise ValueError(
+            "Coefficient-based selection only supports the fitted linear "
+            "regression models in this optimization workflow."
+        )
+    hyperparameters = training["hyperparameters"]
+    alpha = float(hyperparameters["alpha"])
+    l1_ratio = (
+        float(hyperparameters["l1_ratio"])
+        if model_type == "elastic_net"
+        else None
+    )
+
+    def evaluate_features(features: list[str]) -> dict[str, Any]:
+        model_result = create_folds_and_train(
             continue
         candidate_result = run_random_forest_workflow(
             data,
@@ -369,6 +606,26 @@ def main():
     dataset_description = json.loads(generate_report(df, path, target))
     statistics = json.loads(generate_model_statistics(df, target))
     label_type = dataset_description["Reports"][0]["Target column"]["Type"]
+
+    if "categor" in str(label_type).lower():
+        classification_report = {
+            "target_column": target,
+            "dataset_description": dataset_description,
+            "statistics": statistics,
+        }
+        model_reports = _run_logistic_regression_optimization(
+            df,
+            target,
+            classification_report,
+            deferred_encoding_operations,
+        )
+        if not model_reports:
+            raise ValueError(
+                "The Logistic Regression agent did not recommend a "
+                "configuration to evaluate."
+            )
+        return _select_best_classification_report(model_reports)
+
     print(statistics)
     regression_recommendation = linear_regression_agent(
         dataset_description=dataset_description,

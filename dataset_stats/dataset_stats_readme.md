@@ -1,7 +1,8 @@
 # Dataset Stats
 
 This folder contains helpers for loading CSV data, generating a general
-data-quality report, and producing regression-specific statistical evidence.
+data-quality report, and producing regression- or classification-specific
+statistical evidence.
 
 ## Files
 
@@ -188,3 +189,27 @@ filenames separately when creating a report.
 
 - Python
 - pandas
+
+### `model_statistics_classification.py`
+
+`generate_model_statistics_classification(data, target_column,
+correlation_threshold=0.8, random_state=42)` returns JSON classification
+statistics. It reports target classes and imbalance, numeric and categorical
+feature quality, ANOVA F-tests, chi-square associations, mutual information,
+numeric feature correlations, model-suitability indicators, and default
+Logistic Regression and Random Forest baselines.
+
+Association calculations use pairwise usable observations and do not imply
+causation or automatic feature removal. Missing numeric values are median
+imputed and categorical missing values are most-frequent imputed in
+model-evaluation pipelines. Numeric features are standardized for Logistic
+Regression. Categorical features are one-hot encoded for both baselines.
+Preprocessing is fit independently inside each cross-validation training
+partition and the holdout training partition.
+
+The baseline configuration is copied from the project Logistic Regression
+and Random Forest classifier defaults. Evaluation uses deterministic
+stratified cross-validation, with the number of folds limited by the smallest
+class count (and a minimum of two). Training and holdout metrics are reported
+separately from cross-validation metrics. Models record structured failures
+instead of silently omitting a model if fitting or preprocessing fails.
