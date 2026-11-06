@@ -12,7 +12,13 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from .logistic_model import create_model, validate_model_params
+from .logistic_model import (
+    DEFAULTS,
+    create_model,
+    predict,
+    validate_model_params,
+    validate_threshold,
+)
 
 
 DEFAULT_C_VALUES = [0.01, 0.1, 1.0, 10.0]
@@ -143,6 +149,7 @@ def classification_metrics(
 
 def evaluate_configuration(X, y, folds, configuration, metric="f1", average=None, positive_class=None):
     configuration = dict(configuration)
+    configuration.setdefault("threshold", DEFAULTS["threshold"])
     fold_metrics = []
     failures = []
     for fold_number, fold in enumerate(folds, start=1):
@@ -152,7 +159,11 @@ def evaluate_configuration(X, y, folds, configuration, metric="f1", average=None
             X_validation = X.iloc[fold.validation_indices] if hasattr(X, "iloc") else np.asarray(X)[fold.validation_indices]
             y_array = np.asarray(y)
             model.fit(X_train, y_array[fold.train_indices])
-            predictions = model.predict(X_validation)
+            predictions = predict(
+                model,
+                X_validation,
+                threshold=configuration["threshold"],
+            )
             probabilities = model.predict_proba(X_validation)
             scores = classification_metrics(
                 y_array[fold.validation_indices],
@@ -163,6 +174,7 @@ def evaluate_configuration(X, y, folds, configuration, metric="f1", average=None
                 model_classes=model.classes_,
             )
             scores["positive_class"] = positive_class
+            scores["threshold"] = configuration["threshold"]
             fold_metrics.append(scores)
         except Exception as exc:
             failures.append({"fold": fold_number, "error": str(exc)})
@@ -227,8 +239,18 @@ def optimize_hyperparameters(
     }
 
 
-def evaluate_holdout(model, X_holdout, y_holdout, positive_class=None, average=None):
-    predictions = model.predict(X_holdout)
+def evaluate_holdout(
+    model,
+    X_holdout,
+    y_holdout,
+    positive_class=None,
+    average=None,
+    threshold=None,
+):
+    if threshold is None:
+        threshold = getattr(model, "threshold_", DEFAULTS["threshold"])
+    threshold = validate_threshold(threshold)
+    predictions = predict(model, X_holdout, threshold=threshold)
     probabilities = model.predict_proba(X_holdout)
     metrics = classification_metrics(
         y_holdout,
@@ -239,6 +261,7 @@ def evaluate_holdout(model, X_holdout, y_holdout, positive_class=None, average=N
         model_classes=model.classes_,
     )
     metrics["positive_class"] = positive_class
+    metrics["threshold"] = threshold
     return metrics
 
 

@@ -3,11 +3,16 @@ from pathlib import Path
 
 from dataset_stats.description import generate_report
 from dataset_stats.model_statistics import generate_model_statistics
+from dataset_stats.model_statistics_classification import (
+    generate_model_statistics_classification,
+)
 from dataset_stats.open_file import read_csv_files
+from agents_code.classification_agent import classification_agent
 from agents_code.linear_regression_agent import linear_regression_agent
 from agents_code.preprocessing_agent import preprocessing_agent
 from agents_code.rfr_agent import rfr_agent
 from knn_regression.main_knn_workflow import run_knn_workflow
+from logistic_regression.optimization_loop import run_logistic_optimization
 from linear_regression.model_selection import (
     select_best_feature_report,
 )
@@ -367,8 +372,61 @@ def main():
     )
 
     dataset_description = json.loads(generate_report(df, path, target))
-    statistics = json.loads(generate_model_statistics(df, target))
     label_type = dataset_description["Reports"][0]["Target column"]["Type"]
+
+    is_numeric_target = any(
+        kind in label_type.lower()
+        for kind in ("numerical", "numeric")
+    )
+    if not is_numeric_target:
+        statistics = json.loads(
+            generate_model_statistics_classification(df, target)
+        )
+        print(statistics)
+        classification_recommendation = classification_agent(
+            dataset_description=dataset_description,
+            target_column=target,
+            label_type=label_type,
+            statistics=statistics,
+            row_count=len(df),
+        )
+        print("Classification agent returned:")
+        print(classification_recommendation)
+        ranked_models = classification_recommendation["ranked_models"]
+        top_model = next(
+            (model for model in ranked_models if model.get("rank") == 1),
+            None,
+        )
+        if top_model and top_model.get("model_name") == "LogisticRegression":
+            logistic_result = run_logistic_optimization(
+                df,
+                target,
+                {
+                    "target_column": target,
+                    "dataset_description": dataset_description,
+                    "statistics": statistics,
+                    "initial_model_ranking": classification_recommendation,
+                },
+                deferred_encoding_operations,
+            )
+            print("Best Logistic Regression model:")
+            print(
+                json.dumps(
+                    {
+                        "parameters": logistic_result["best_configuration"],
+                        "cross_validation": logistic_result["cross_validation"][
+                            "mean_std"
+                        ],
+                        "holdout_metrics": logistic_result["holdout_metrics"],
+                    },
+                    indent=2,
+                    allow_nan=False,
+                )
+            )
+            return logistic_result
+        return classification_recommendation
+
+    statistics = json.loads(generate_model_statistics(df, target))
     print(statistics)
     regression_recommendation = linear_regression_agent(
         dataset_description=dataset_description,

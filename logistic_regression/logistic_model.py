@@ -9,6 +9,7 @@ from sklearn.linear_model import LogisticRegression
 DEFAULTS = {
     "penalty": "l2",
     "C": 1.0,
+    "threshold": 0.5,
     "solver": "lbfgs",
     "l1_ratio": None,
     "max_iter": 1000,
@@ -16,8 +17,20 @@ DEFAULTS = {
 }
 
 
+def validate_threshold(threshold: Any) -> float:
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, Real)
+        or not np.isfinite(threshold)
+        or not 0.3 <= threshold <= 0.7
+    ):
+        raise ValueError("threshold must be between 0.3 and 0.7")
+    return float(threshold)
+
+
 def validate_model_params(params: Dict[str, Any]) -> Dict[str, Any]:
     values = {**DEFAULTS, **params}
+    values["threshold"] = validate_threshold(values["threshold"])
     if values["penalty"] not in {"l1", "l2", "elasticnet"}:
         raise ValueError("penalty must be 'l1', 'l2', or 'elasticnet'")
     if isinstance(values["C"], bool) or not isinstance(values["C"], Real) or not np.isfinite(values["C"]) or values["C"] <= 0:
@@ -61,11 +74,26 @@ def create_model(**params: Any) -> LogisticRegression:
 
 
 def fit_model(X, y, **params: Any):
-    return create_model(**params).fit(X, y)
+    model = create_model(**params).fit(X, y)
+    model.threshold_ = validate_threshold(
+        params.get("threshold", DEFAULTS["threshold"])
+    )
+    return model
 
 
-def predict(model, X):
-    return model.predict(X)
+def predict(model, X, threshold=None):
+    if threshold is None:
+        threshold = getattr(model, "threshold_", DEFAULTS["threshold"])
+    threshold = validate_threshold(threshold)
+    if len(model.classes_) != 2:
+        return model.predict(X)
+    probabilities = predict_proba(model, X)
+    negative_class, positive_class = model.classes_
+    return np.where(
+        probabilities[:, 1] >= threshold,
+        positive_class,
+        negative_class,
+    )
 
 
 def predict_proba(model, X):

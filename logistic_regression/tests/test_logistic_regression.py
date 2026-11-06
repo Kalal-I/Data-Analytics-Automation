@@ -5,7 +5,13 @@ import pytest
 from logistic_regression.data_split import train_holdout_split
 from logistic_regression.feature_selection import validate_features
 from logistic_regression.folds import create_cv_folds
-from logistic_regression.logistic_model import create_model, fit_model, predict_proba
+from logistic_regression.logistic_model import (
+    DEFAULTS,
+    create_model,
+    fit_model,
+    predict,
+    predict_proba,
+)
 from logistic_regression.main_logistic_workflow import run_logistic_workflow
 from logistic_regression.optimization import classification_metrics, optimize_hyperparameters
 
@@ -74,6 +80,44 @@ def test_solver_compatibility_and_invalid_parameters():
         create_model(penalty="elasticnet", l1_ratio=0)
     with pytest.raises(ValueError):
         create_model(C=0)
+    with pytest.raises(ValueError, match="threshold"):
+        create_model(threshold=0.71)
+    assert DEFAULTS["threshold"] == 0.5
+
+
+def test_binary_predictions_use_configured_probability_threshold():
+    class ProbabilityModel:
+        classes_ = np.array(["no", "yes"])
+
+        def predict_proba(self, X):
+            positive = np.asarray(X["probability"], dtype=float)
+            return np.column_stack((1 - positive, positive))
+
+    model = ProbabilityModel()
+    X = pd.DataFrame({"probability": [0.35, 0.55, 0.68]})
+
+    assert predict(model, X, threshold=0.5).tolist() == [
+        "no",
+        "yes",
+        "yes",
+    ]
+    assert predict(model, X, threshold=0.6).tolist() == [
+        "no",
+        "no",
+        "yes",
+    ]
+
+
+def test_fit_model_retains_threshold_for_prediction_helper():
+    data = binary_data()
+    model = fit_model(
+        data[["x1", "x2"]],
+        data["target"],
+        threshold=0.6,
+    )
+
+    assert model.threshold_ == 0.6
+    assert predict(model, data[["x1", "x2"]]).shape == (len(data),)
 
 
 def test_binary_multiclass_and_predict_proba():
